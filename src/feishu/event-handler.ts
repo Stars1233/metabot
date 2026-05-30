@@ -364,17 +364,18 @@ export function createEventDispatcher(
           text = '请分析这个文件';
           logger.info({ userId, chatId, chatType, fileKey, fileName }, 'Received file message');
         } else if (msgType === 'post') {
-          // Rich text (post) message: extract plain text and images from nested structure
+          // Rich text (post) message: extract plain text and images from nested structure,
+          // preserving the original ordering by inlining [图N] placeholders where images appeared.
           try {
             const content = JSON.parse(message.content);
             logger.debug({ postContent: JSON.stringify(content).slice(0, 500) }, 'Raw post content');
-            text = extractTextFromPost(content);
-            const postImages = extractImagesFromPost(content);
-            if (postImages.length > 0) {
-              imageKey = postImages[0];
-              postExtraImages = postImages.slice(1);
+            const interleaved = extractPostInterleaved(content);
+            text = interleaved.text;
+            if (interleaved.imageKeys.length > 0) {
+              imageKey = interleaved.imageKeys[0];
+              postExtraImages = interleaved.imageKeys.slice(1);
             }
-            logger.debug({ extractedText: text.slice(0, 200), imageKey, postImageCount: postImages.length }, 'Extracted post content');
+            logger.debug({ extractedText: text.slice(0, 200), imageKey, postImageCount: interleaved.imageKeys.length }, 'Extracted post content');
           } catch {
             logger.warn({ content: message.content }, 'Failed to parse post message content');
             return;
@@ -467,58 +468,23 @@ function parseMediaMessage(
 }
 
 /**
- * Extract all image_keys from a Feishu post (rich text) message.
- * Looks for { tag: "img", image_key: "..." } elements in the post content.
+ * Extract text and images from a Feishu post (rich text) message in a single pass,
+ * preserving the original ordering. Images are replaced with [图N] placeholders
+ * (1-indexed) inside the text, and the matching image_keys are returned in the
+ * same order, so the caller can re-align them downstream.
+ *
+ * Handles two content shapes:
+ *   With locale wrapper:    { "zh_cn": { "title": "...", "content": [[{tag, ...}, ...], ...] } }
+ *   Without locale wrapper: { "title": "...", "content": [[{tag, ...}, ...], ...] }
  */
-function extractImagesFromPost(content: Record<string, unknown>): string[] {
+function extractPostInterleaved(
+  content: Record<string, unknown>,
+): { text: string; imageKeys: string[] } {
   const bodies: Array<Record<string, unknown>> = [];
 
   if (Array.isArray(content.content)) {
     bodies.push(content);
   } else {
-    for (const locale of Object.values(content)) {
-      if (locale && typeof locale === 'object' && !Array.isArray(locale)) {
-        const loc = locale as Record<string, unknown>;
-        if (Array.isArray(loc.content)) {
-          bodies.push(loc);
-        }
-      }
-    }
-  }
-
-  const keys: string[] = [];
-  for (const body of bodies) {
-    const paragraphs = body.content as unknown[][];
-    for (const paragraph of paragraphs) {
-      if (!Array.isArray(paragraph)) continue;
-      for (const element of paragraph) {
-        if (!element || typeof element !== 'object') continue;
-        const el = element as Record<string, unknown>;
-        if (el.tag === 'img' && typeof el.image_key === 'string') {
-          keys.push(el.image_key);
-        }
-      }
-    }
-  }
-
-  return keys;
-}
-
-/**
- * Extract plain text from Feishu post (rich text) message content.
- * Handles two formats:
- *   With locale wrapper: { "zh_cn": { "title": "...", "content": [[{tag, text}, ...], ...] } }
- *   Without locale wrapper: { "title": "...", "content": [[{tag, text}, ...], ...] }
- */
-function extractTextFromPost(content: Record<string, unknown>): string {
-  // Try to find the post body — either the content itself or nested under a locale key
-  const bodies: Array<Record<string, unknown>> = [];
-
-  if (Array.isArray(content.content)) {
-    // Direct format (no locale wrapper)
-    bodies.push(content);
-  } else {
-    // Locale-wrapped format: values are { title, content }
     for (const locale of Object.values(content)) {
       if (locale && typeof locale === 'object' && !Array.isArray(locale)) {
         const loc = locale as Record<string, unknown>;
@@ -531,6 +497,7 @@ function extractTextFromPost(content: Record<string, unknown>): string {
 
   for (const body of bodies) {
     const parts: string[] = [];
+    const imageKeys: string[] = [];
 
     if (body.title && typeof body.title === 'string') {
       parts.push(body.title);
@@ -545,6 +512,9 @@ function extractTextFromPost(content: Record<string, unknown>): string {
         const el = element as Record<string, unknown>;
         if ((el.tag === 'text' || el.tag === 'a') && typeof el.text === 'string') {
           line.push(el.text);
+        } else if (el.tag === 'img' && typeof el.image_key === 'string') {
+          imageKeys.push(el.image_key);
+          line.push(`[图${imageKeys.length}]`);
         }
       }
       if (line.length > 0) {
@@ -552,10 +522,10 @@ function extractTextFromPost(content: Record<string, unknown>): string {
       }
     }
 
-    if (parts.length > 0) {
-      return parts.join('\n');
+    if (parts.length > 0 || imageKeys.length > 0) {
+      return { text: parts.join('\n'), imageKeys };
     }
   }
 
-  return '';
+  return { text: '', imageKeys: [] };
 }
