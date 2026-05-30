@@ -514,7 +514,7 @@ function extractPostInterleaved(
           line.push(el.text);
         } else if (el.tag === 'img' && typeof el.image_key === 'string') {
           imageKeys.push(el.image_key);
-          line.push(`[图${imageKeys.length}]`);
+          line.push(`[Image ${imageKeys.length}]`);
         }
       }
       if (line.length > 0) {

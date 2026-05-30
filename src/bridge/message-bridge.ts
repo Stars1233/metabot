@@ -1929,7 +1929,7 @@ export class MessageBridge {
       imagePath = path.join(downloadsDir, `${imageKey}.png`);
       const ok = await this.sender.downloadImage(msgId, imageKey, imagePath);
       if (ok) {
-        prompt = `${enginePromptText}\n\n[Image saved at: ${imagePath}]\nPlease use the Read tool to read and analyze this image file.`;
+        prompt = `${enginePromptText}\n\n[Image 1 saved at: ${imagePath}]\nPlease use the Read tool to read and analyze this image file.`;
       } else {
         prompt = `${enginePromptText}\n\n(Note: Failed to download the image)`;
       }
@@ -1946,16 +1946,21 @@ export class MessageBridge {
       }
     }
 
-    // Handle extra media from batched messages
+    // Handle extra media from batched messages.
+    // imageCounter aligns with [Image N] placeholders that event-handler injected into the post text:
+    // main imageKey is [Image 1], extras are [Image 2], [Image 3], ... — keep the same order so file
+    // paths and the in-text references line up.
     const extraPaths: string[] = [];
+    let imageCounter = imageKey ? 1 : 0;
     if (msg.extraMedia && msg.extraMedia.length > 0) {
       for (const media of msg.extraMedia) {
         if (media.imageKey) {
+          imageCounter++;
           const p = path.join(downloadsDir, `${media.imageKey}.png`);
           const ok = await this.sender.downloadImage(media.messageId, media.imageKey, p);
           if (ok) {
             extraPaths.push(p);
-            prompt += `\n[Image saved at: ${p}]`;
+            prompt += `\n[Image ${imageCounter} saved at: ${p}]`;
           }
         }
         if (media.fileKey && media.fileName) {
