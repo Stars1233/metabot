@@ -469,7 +469,7 @@ function parseMediaMessage(
 
 /**
  * Extract text and images from a Feishu post (rich text) message in a single pass,
- * preserving the original ordering. Images are replaced with [图N] placeholders
+ * preserving the original ordering. Images are replaced with [Image N] placeholders
  * (1-indexed) inside the text, and the matching image_keys are returned in the
  * same order, so the caller can re-align them downstream.
  *
