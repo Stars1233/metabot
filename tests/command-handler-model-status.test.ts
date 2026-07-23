@@ -256,6 +256,14 @@ describe('CommandHandler /model', () => {
     expect(notices[0].content).toContain('claude-opus-4-8');
   });
 
+  it('refuses to change the model while a task is active', async () => {
+    const { handler, notices, getSessionModel } = buildHandler({ hasRunningTask: true });
+    await handler.handle(msg('/model claude-opus-4-8'));
+    expect(getSessionModel()).toBeUndefined();
+    expect(notices[0].title).toContain('Task In Progress');
+    expect(notices[0].color).toBe('orange');
+  });
+
   it('clears overrides on /model reset', async () => {
     const { handler, notices, getSessionEngine, getSessionModel } = buildHandler({
       engine: 'kimi',

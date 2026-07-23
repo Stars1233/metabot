@@ -19,7 +19,7 @@ export class CommandHandler {
     private sessionManager: SessionManager,
     private memoryClient: MemoryClient,
     private audit: AuditLogger,
-    private getRunningTask: (chatId: string) => { startTime: number } | undefined,
+    private getActiveTask: (chatId: string) => { startTime: number } | undefined,
     private stopTask: (chatId: string) => void,
     /**
      * Drain the chat's queued-message buffer, returning the number of
@@ -104,7 +104,7 @@ export class CommandHandler {
 
       case '/reset':
         {
-          const task = this.getRunningTask(chatId);
+          const task = this.getActiveTask(chatId);
           const cleared = this.clearQueue(chatId);
           if (task) {
             this.audit.log({
@@ -140,7 +140,7 @@ export class CommandHandler {
         return true;
 
       case '/stop': {
-        const task = this.getRunningTask(chatId);
+        const task = this.getActiveTask(chatId);
         // Always drain the queue first — otherwise the running task's
         // finally block immediately picks the next queued message via
         // processQueue and the user's "stop" intent silently fails.
@@ -169,7 +169,7 @@ export class CommandHandler {
 
       case '/status': {
         const session = this.sessionManager.getSession(chatId);
-        const isRunning = !!this.getRunningTask(chatId);
+        const isRunning = !!this.getActiveTask(chatId);
         const botEngine = resolveEngineName(this.config);
         const activeEngine = session.engine ?? botEngine;
         const defaultModel = this.defaultModelForEngine(activeEngine) || '_default_';
@@ -359,6 +359,16 @@ export class CommandHandler {
     }
 
     const normalized = args.toLowerCase();
+
+    if (normalized !== 'list' && normalized !== 'ls' && this.getActiveTask(chatId)) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '⏳ Task In Progress',
+        'A task is active. Use `/stop` first, then change the model.',
+        'orange',
+      );
+      return;
+    }
 
     // Engine switch — /model claude, /model kimi, or /model codex
     if (isEngineName(normalized)) {
@@ -561,7 +571,7 @@ export class CommandHandler {
       return;
     }
 
-    if (this.getRunningTask(chatId)) {
+    if (this.getActiveTask(chatId)) {
       await this.sender.sendTextNotice(
         chatId,
         '⏳ Task In Progress',
