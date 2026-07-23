@@ -157,6 +157,59 @@ function Test-VersionAtLeast {
     }
 }
 
+function Assert-NativeSuccess {
+    param([string]$Operation)
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Operation failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Wait-BridgeHealth {
+    param(
+        [string]$Url,
+        [int]$Attempts = 15,
+        [int]$DelaySeconds = 1
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
+                return $true
+            }
+        } catch {
+            # The bridge can take a few seconds to load dependencies and bots.
+        }
+        if ($attempt -lt $Attempts) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    return $false
+}
+
+function Write-BridgeDiagnostics {
+    param(
+        [string]$InstallDir,
+        [int]$MaxLogLines = 40
+    )
+
+    Write-Warn "Bridge health check failed. Showing bounded diagnostics:"
+    try {
+        & pm2 describe metabot 2>&1 | Select-Object -First 80 | Out-Host
+    } catch {
+        Write-Warn "Unable to read PM2 process details: $($_.Exception.Message)"
+    }
+
+    foreach ($relativePath in @("logs\error.log", "logs\out.log")) {
+        $logPath = Join-Path $InstallDir $relativePath
+        if (Test-Path $logPath) {
+            Write-Host ""
+            Write-Host "--- Last $MaxLogLines lines of $relativePath ---" -ForegroundColor Yellow
+            Get-Content -LiteralPath $logPath -Tail $MaxLogLines -ErrorAction SilentlyContinue | Out-Host
+        }
+    }
+}
+
 function Get-KimiCodeVersion {
     if (-not (Test-Command "kimi")) { return $null }
     try {
@@ -384,6 +437,7 @@ if (Test-Path (Join-Path $MetabotHome ".git")) {
 } else {
     Write-Info "Cloning MetaBot..."
     git clone $MetabotRepo $MetabotHome
+    Assert-NativeSuccess "git clone"
 }
 Write-Success "MetaBot code ready at $MetabotHome"
 
@@ -395,12 +449,14 @@ Write-Step "Phase 3: Installing dependencies"
 Push-Location $MetabotHome
 Write-Info "Running npm install..."
 npm install --production=false
+Assert-NativeSuccess "npm install"
 Write-Success "npm dependencies installed"
 
 # PM2
 if (-not (Test-Command "pm2")) {
     Write-Info "Installing PM2 globally..."
     npm install -g pm2
+    Assert-NativeSuccess "PM2 installation"
     Write-Success "PM2 installed"
 } else {
     Write-Success "PM2 already installed"
@@ -598,7 +654,7 @@ if (-not $SkipConfig) {
 
     $ApiPort = "9100"
     $LogLevel = "info"
-    $MemoryServerUrl = "http://localhost:8100"
+    $CoreUrl = if ($env:METABOT_CORE_URL) { $env:METABOT_CORE_URL } else { "http://localhost:9200" }
 
     # Claude executable path
     $ClaudePath = ""
@@ -654,8 +710,9 @@ LOG_LEVEL=$LogLevel
 
     $envContent += @"
 
-# MetaMemory
-META_MEMORY_URL=$MemoryServerUrl
+# Optional Core service (not installed by the Windows Bridge installer)
+METABOT_CORE_URL=$CoreUrl
+# METABOT_CORE_TOKEN=
 "@
 
     [System.IO.File]::WriteAllText($EnvFile, $envContent, [System.Text.UTF8Encoding]::new($false))
@@ -869,48 +926,31 @@ if ($MetabotHome -ne $DefaultMetabotHome) {
 }
 
 # ============================================================================
-# Phase 7: MetaMemory
+# Phase 7: Core status
 # ============================================================================
-Write-Step "Phase 7: MetaMemory"
+Write-Step "Phase 7: Checking optional Core service"
 
-$MetamemoryInstalled = $false
-
-Write-Info "MetaMemory is embedded in MetaBot (no separate server needed)."
-New-Item -ItemType Directory -Path (Join-Path $MetabotHome "data") -Force | Out-Null
-
-# Migrate existing database from standalone MetaMemory if found
-$OldDb = Join-Path $env:USERPROFILE ".metamemory-data\metamemory.db"
-$NewDb = Join-Path $MetabotHome "data\metamemory.db"
-if ((Test-Path $OldDb) -and -not (Test-Path $NewDb)) {
-    Write-Info "Migrating existing MetaMemory database..."
-    Copy-Item $OldDb $NewDb -Force
-    Write-Success "Database migrated from ~/.metamemory-data/"
+$ConfiguredCoreUrl = if ($env:METABOT_CORE_URL) { $env:METABOT_CORE_URL } else { "http://localhost:9200" }
+if (Test-Path $EnvFile) {
+    $coreLine = Get-Content -LiteralPath $EnvFile -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match '^\s*METABOT_CORE_URL=' } |
+        Select-Object -Last 1
+    if ($coreLine) {
+        $ConfiguredCoreUrl = ($coreLine -replace '^\s*METABOT_CORE_URL=', '').Trim().Trim('"').Trim("'")
+    }
 }
 
-# Stop old standalone MetaMemory PM2 process if running
+Write-Info "The Windows installer manages the MetaBot Bridge only."
+Write-Info "Core Console and MetaMemory require a separately running Core service."
 try {
-    $pm2Desc = pm2 describe metamemory 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Info "Stopping old standalone MetaMemory PM2 process..."
-        pm2 delete metamemory 2>$null
-        Write-Success "Old MetaMemory process removed"
+    $coreHealth = Invoke-WebRequest -Uri "$($ConfiguredCoreUrl.TrimEnd('/'))/health" -UseBasicParsing -TimeoutSec 3
+    if ($coreHealth.StatusCode -ge 200 -and $coreHealth.StatusCode -lt 300) {
+        Write-Success "Core service is reachable at $ConfiguredCoreUrl"
     }
-} catch {}
-
-# Kill any process occupying port 8100
-try {
-    $port8100 = Get-NetTCPConnection -LocalPort 8100 -ErrorAction SilentlyContinue
-    if ($port8100) {
-        foreach ($conn in $port8100) {
-            Write-Info "Killing old process on port 8100 (PID: $($conn.OwningProcess))..."
-            Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
-        }
-        Start-Sleep -Seconds 1
-    }
-} catch {}
-
-$MetamemoryInstalled = $true
-Write-Success "MetaMemory will start automatically with MetaBot on port 8100"
+} catch {
+    Write-Warn "Core service is not reachable at $ConfiguredCoreUrl. The Bridge can still serve IM bots."
+    Write-Warn "Set METABOT_CORE_URL and METABOT_CORE_TOKEN in $EnvFile when Core is available."
+}
 
 # ============================================================================
 # Phase 8: Build + Start MetaBot with PM2
@@ -920,27 +960,43 @@ Write-Step "Phase 8: Starting MetaBot"
 Push-Location $MetabotHome
 
 Write-Info "Building TypeScript..."
-try {
-    npm run build 2>$null
-    Write-Success "Build complete"
-} catch {
-    Write-Warn "Build failed, will use tsx directly via PM2"
-}
+npm run build
+Assert-NativeSuccess "MetaBot build"
+Write-Success "Build complete"
 
 # Always delete + start fresh
-try {
-    $pm2Desc = pm2 describe metabot 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Info "Removing old MetaBot PM2 process..."
-        pm2 delete metabot 2>$null
-    }
-} catch {}
+pm2 describe metabot 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Write-Info "Removing old MetaBot PM2 process..."
+    pm2 delete metabot 2>$null
+    Assert-NativeSuccess "removing the old MetaBot PM2 process"
+}
 
 Write-Info "Starting MetaBot with PM2..."
 pm2 start ecosystem.config.cjs
+Assert-NativeSuccess "PM2 start"
 
-try { pm2 save --force 2>$null } catch {}
-Write-Success "MetaBot is running!"
+pm2 save --force 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn "PM2 started MetaBot, but saving the process list failed with exit code $LASTEXITCODE."
+}
+
+$HealthPort = if ($ApiPort) { $ApiPort } else { "9100" }
+if (Test-Path $EnvFile) {
+    $portLine = Get-Content -LiteralPath $EnvFile -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match '^\s*API_PORT=' } |
+        Select-Object -Last 1
+    if ($portLine) {
+        $HealthPort = ($portLine -replace '^\s*API_PORT=', '').Trim().Trim('"').Trim("'")
+    }
+}
+$BridgeHealthUrl = "http://127.0.0.1:$HealthPort/api/health"
+if (-not (Wait-BridgeHealth -Url $BridgeHealthUrl)) {
+    Write-BridgeDiagnostics -InstallDir $MetabotHome
+    throw "MetaBot Bridge did not become healthy at $BridgeHealthUrl."
+}
+
+Write-Success "MetaBot Bridge is healthy at $BridgeHealthUrl"
 Pop-Location
 
 # ============================================================================
@@ -964,9 +1020,7 @@ if (-not $SkipConfig) {
         Write-Host "  Provider:       " -ForegroundColor White -NoNewline; Write-Host $ProviderName
     }
 }
-if ($MetamemoryInstalled) {
-    Write-Host "  MetaMemory:     " -ForegroundColor White -NoNewline; Write-Host "http://localhost:8100"
-}
+Write-Host "  Core Console:   " -ForegroundColor White -NoNewline; Write-Host "$ConfiguredCoreUrl (separate service)"
 
 Write-Host ""
 Write-Host "  Commands:" -ForegroundColor White
