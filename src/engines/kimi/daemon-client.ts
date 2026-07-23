@@ -342,10 +342,16 @@ export class KimiDaemonClient {
     try {
       return await this.rawRequest(resource, body, query);
     } catch (error) {
-      // Recover once from a daemon restart or half-open local connection. API
-      // validation/provider errors carry a numeric code and must not restart.
+      // A transport failure means the cached readiness is stale even when the
+      // failed request cannot be retried. API validation/provider errors carry
+      // a numeric code and do not invalidate daemon readiness.
       if (!(error instanceof KimiDaemonError) || error.code !== undefined) throw error;
       this.ready = false;
+      // Recover a bodyless GET once after a daemon restart or half-open local
+      // connection. Never replay POSTs: the daemon may have accepted the
+      // operation before the response was lost, so retrying could duplicate a
+      // prompt or another side effect.
+      if (body !== undefined) throw error;
       await this.ensureRunning();
       return this.rawRequest(resource, body, query);
     }

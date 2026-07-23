@@ -60,6 +60,65 @@ describe('KimiDaemonClient', () => {
     expect((fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>).Authorization).toBe('Bearer test-token');
   });
 
+  it('does not replay a prompt when its response is lost', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response({ ok: true }))
+      .mockRejectedValueOnce(new Error('socket closed after request'));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new KimiDaemonClient();
+
+    await expect(client.submitPrompt('session-1', 'run this once')).rejects.toThrow(
+      'Kimi Code server request failed: socket closed after request',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('/api/v1/sessions/session-1/prompts');
+  });
+
+  it('probes again before a later POST after a daemon transport failure', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response({ ok: true }))
+      .mockRejectedValueOnce(new Error('daemon exited during create'))
+      .mockResolvedValueOnce(response({ ok: true }))
+      .mockResolvedValueOnce(response({ id: 'session-recovered' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new KimiDaemonClient();
+
+    await expect(client.createSession('/tmp/first')).rejects.toThrow(
+      'Kimi Code server request failed: daemon exited during create',
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await expect(client.createSession('/tmp/second')).resolves.toMatchObject({
+      id: 'session-recovered',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/healthz');
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('/api/v1/sessions');
+    expect(String(fetchMock.mock.calls[2]?.[0])).toContain('/api/v1/healthz');
+    expect(String(fetchMock.mock.calls[3]?.[0])).toContain('/api/v1/sessions');
+  });
+
+  it('reconnects and retries a bodyless GET after a transport failure', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response({ ok: true }))
+      .mockRejectedValueOnce(new Error('stale connection'))
+      .mockResolvedValueOnce(response({ ok: true }))
+      .mockResolvedValueOnce(response({ as_of_seq: 17 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new KimiDaemonClient();
+
+    await expect(client.getSnapshot('session-1')).resolves.toMatchObject({ as_of_seq: 17 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('/api/v1/sessions/session-1/snapshot');
+    expect(String(fetchMock.mock.calls[3]?.[0])).toContain('/api/v1/sessions/session-1/snapshot');
+  });
+
   it('resolves short model names against the live Kimi Code config', async () => {
     await writeFile(
       path.join(home, 'config.toml'),
