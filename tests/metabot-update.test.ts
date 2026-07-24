@@ -210,3 +210,39 @@ describe('Codex install defaults', () => {
     expect(source).toContain('mkdir -p "$codex_home/skills" "$codex_home/memories" "$codex_home/agents"');
   });
 });
+
+describe('workspace and packaged Skill ownership', () => {
+  it('leaves workspace instructions user-owned across install and update', () => {
+    const installer = fs.readFileSync(path.join(REPO_ROOT, 'install.sh'), 'utf-8');
+    const updater = fs.readFileSync(METABOT_BIN, 'utf-8');
+    const windowsInstaller = fs.readFileSync(path.join(REPO_ROOT, 'install.ps1'), 'utf-8');
+
+    for (const source of [installer, updater, windowsInstaller]) {
+      expect(source).not.toContain('src/workspace/AGENTS.md');
+      expect(source).not.toContain('src/workspace/CLAUDE.md');
+      expect(source).not.toContain('workspace-harness-sync');
+    }
+    expect(installer).toContain('Retired project-level $SKILL mirror');
+    expect(updater).toContain('Retired project-level $skill mirror');
+    expect(windowsInstaller).toContain('Retired project-level $skill mirror');
+  });
+
+  it('installs only canonical global MetaBot Skills and retires voice', () => {
+    const installer = fs.readFileSync(path.join(REPO_ROOT, 'install.sh'), 'utf-8');
+    const updater = fs.readFileSync(METABOT_BIN, 'utf-8');
+    const windowsInstaller = fs.readFileSync(path.join(REPO_ROOT, 'install.ps1'), 'utf-8');
+
+    for (const source of [installer, updater]) {
+      expect(source).toContain('packages/skills/metabot');
+      expect(source).toContain('packages/skills/metabot-team');
+      expect(source).toContain('Retired voice Skill');
+      expect(source).not.toContain('src/skills/metabot-team');
+      expect(source).not.toContain('src/skills/voice');
+    }
+    expect(windowsInstaller).toContain('packages\\skills\\metabot');
+    expect(windowsInstaller).toContain('packages\\skills\\metabot-team');
+    expect(windowsInstaller).toContain('Retired voice Skill');
+    expect(windowsInstaller).not.toContain('src\\skills\\metabot-team');
+    expect(windowsInstaller).not.toContain('src\\skills\\voice');
+  });
+});

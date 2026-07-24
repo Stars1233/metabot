@@ -34,6 +34,29 @@ success() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 
+_backup_skill_path() {
+  local source="$1"
+  local backup_root="$2"
+  [[ -e "$source" || -L "$source" ]] || return 0
+  mkdir -p "$backup_root"
+  local backup
+  backup="$(mktemp -d "$backup_root/$(basename "$source").XXXXXX")"
+  rmdir "$backup"
+  mv "$source" "$backup"
+}
+
+_install_skill_bundle() {
+  local source="$1"
+  local destination="$2"
+  local backup_root="$3"
+  if [[ -d "$destination" ]] && diff -qr "$source" "$destination" >/dev/null 2>&1; then
+    return 0
+  fi
+  _backup_skill_path "$destination" "$backup_root"
+  mkdir -p "$destination"
+  cp -R "$source/." "$destination/"
+}
+
 # --- Bridge daemon API config (Category 2): env vars > .env file > defaults ---
 # Read API_PORT / API_SECRET / METABOT_URL from $METABOT_HOME/.env without
 # clobbering values already exported in the environment.
@@ -210,11 +233,11 @@ cmd_update() {
     success "CLI tools updated"
   fi
 
-  # Update skills in ~/.claude/skills and ~/.codex/skills
+  # Update MetaBot-owned Skills in user-global Claude, Codex, and Kimi roots.
   SKILLS_DIR="$HOME/.claude/skills"
   CODEX_SKILLS_DIR="$HOME/.codex/skills"
   AGENTS_SKILLS_DIR="$HOME/.agents/skills"
-  mkdir -p "$SKILLS_DIR" "$CODEX_SKILLS_DIR"
+  mkdir -p "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"
   info "Updating skills..."
   local src=""
   local -a lark_skill_names=(
@@ -243,25 +266,29 @@ cmd_update() {
   # agents/t5t to the metabot-core feature CLI). metabot-team is the compact
   # Agent Teams coordination skill. metaskill / metaschedule remain opt-in;
   # sources still ship in src/skills/* for manual copy.
-  for skill in metabot voice metabot-team; do
+  for skill in metabot metabot-team; do
     case "$skill" in
       metabot)      src="$METABOT_HOME/packages/skills/metabot" ;;
-      voice)        src="$METABOT_HOME/src/skills/voice" ;;
-      metabot-team) src="$METABOT_HOME/src/skills/metabot-team" ;;
+      metabot-team) src="$METABOT_HOME/packages/skills/metabot-team" ;;
       *)            src="" ;;
     esac
     if [[ -n "$src" && -d "$src" ]]; then
-      for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
-        mkdir -p "$dst_root/$skill"
-        cp -r "$src/." "$dst_root/$skill/"
+      for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"; do
+        _install_skill_bundle "$src" "$dst_root/$skill" "$HOME/.metabot/skill-backups"
       done
+    fi
+  done
+  for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"; do
+    if [[ -e "$dst_root/voice" || -L "$dst_root/voice" ]]; then
+      _backup_skill_path "$dst_root/voice" "$HOME/.metabot/skill-backups"
+      info "Retired voice Skill from $dst_root"
     fi
   done
   # Strip legacy skill bundles (Phase 4 consolidation).
   for legacy in metamemory skill-hub; do
-    for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
-      if [[ -d "$dst_root/$legacy" ]]; then
-        rm -rf "$dst_root/$legacy"
+    for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"; do
+      if [[ -e "$dst_root/$legacy" || -L "$dst_root/$legacy" ]]; then
+        _backup_skill_path "$dst_root/$legacy" "$HOME/.metabot/skill-backups"
         info "Removed legacy $legacy skill from $dst_root (use \`metabot ${legacy/skill-hub/skills}\` instead)"
       fi
     done
@@ -321,7 +348,7 @@ cmd_update() {
         fi
       done
       if [[ -n "$lark_src" ]]; then
-        for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
+        for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR" "$AGENTS_SKILLS_DIR"; do
           mkdir -p "$dst_root/$lark_skill"
           # Skip when src and dst already resolve to the same inode
           # (lark-cli installs ~/.agents/skills/* and symlinks them into
@@ -347,33 +374,27 @@ cmd_update() {
     if [[ -n "$work_dir" ]]; then
       local ws_skills_dir="$work_dir/.claude/skills"
       local ws_codex_skills_dir="$work_dir/.codex/skills"
-      mkdir -p "$ws_skills_dir" "$ws_codex_skills_dir"
+      local ws_agents_skills_dir="$work_dir/.agents/skills"
+      local -a ws_skill_roots=("$ws_skills_dir" "$ws_codex_skills_dir" "$ws_agents_skills_dir")
+      mkdir -p "${ws_skill_roots[@]}"
 
-      # Copy common skills (Phase 4: metamemory/skill-hub removed).
-      for skill in metabot voice; do
-        if [[ -d "$SKILLS_DIR/$skill" ]]; then
-          for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
-            mkdir -p "$dst_root/$skill"
-            cp -r "$SKILLS_DIR/$skill/." "$dst_root/$skill/"
-          done
-        fi
-      done
-      # Strip legacy skill bundles from a previously-deployed workspace.
-      for legacy in metamemory skill-hub; do
-        for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
-          if [[ -d "$dst_root/$legacy" ]]; then
-            rm -rf "$dst_root/$legacy"
+      # MetaBot-owned Skills are global-only. Retire historical project
+      # mirrors so stale copies cannot shadow a current global bundle.
+      for skill in metabot metabot-team voice; do
+        for dst_root in "${ws_skill_roots[@]}"; do
+          if [[ -e "$dst_root/$skill" || -L "$dst_root/$skill" ]]; then
+            _backup_skill_path "$dst_root/$skill" "$work_dir/.metabot/skill-backups"
+            info "Retired project-level $skill mirror from $dst_root"
           fi
         done
       done
-      # Mirror opt-in skills (metaskill / metaschedule) only when present.
-      for skill in metaskill metaschedule; do
-        if [[ -d "$SKILLS_DIR/$skill" ]]; then
-          for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
-            mkdir -p "$dst_root/$skill"
-            cp -r "$SKILLS_DIR/$skill/." "$dst_root/$skill/"
-          done
-        fi
+      # Strip legacy skill bundles from a previously-deployed workspace.
+      for legacy in metamemory skill-hub; do
+        for dst_root in "${ws_skill_roots[@]}"; do
+          if [[ -e "$dst_root/$legacy" || -L "$dst_root/$legacy" ]]; then
+            _backup_skill_path "$dst_root/$legacy" "$work_dir/.metabot/skill-backups"
+          fi
+        done
       done
       # Copy lark-cli skills if previously installed
       if [[ "$has_lark_skills" == "true" ]]; then
@@ -387,7 +408,7 @@ cmd_update() {
             fi
           done
           if [[ -n "$lark_src" ]]; then
-            for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
+            for dst_root in "${ws_skill_roots[@]}"; do
               mkdir -p "$dst_root/$lark_skill"
               [[ "$lark_src" -ef "$dst_root/$lark_skill" ]] && continue
               cp -r "$lark_src/." "$dst_root/$lark_skill/"
@@ -402,14 +423,10 @@ cmd_update() {
       if [[ -d "$ws_codex_skills_dir/feishu-doc" ]]; then
         rm -rf "$ws_codex_skills_dir/feishu-doc"
       fi
-      # Update CLAUDE.md
-      if [[ -f "$METABOT_HOME/src/workspace/CLAUDE.md" ]]; then
-        cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$work_dir/CLAUDE.md"
-        if [[ ! -e "$work_dir/AGENTS.md" ]]; then
-          cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$work_dir/AGENTS.md"
-        fi
-      fi
-      success "Workspace skills updated"
+      # Workspace instruction files are user-owned. Updates leave AGENTS.md
+      # and CLAUDE.md untouched.
+      rm -f "$work_dir/.metabot/workspace-harness.sha256"
+      success "Workspace Skill mirrors reconciled"
     fi
   fi
 

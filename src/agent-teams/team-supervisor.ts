@@ -1,6 +1,7 @@
 import type { BotRegistry, RegisteredBot } from '../api/bot-registry.js';
 import type { MessageBridge } from '../bridge/message-bridge.js';
 import type { Logger } from '../utils/logger.js';
+import { buildAgentTeamPromptContext } from './prompt-context.js';
 import type { AgentTeamStore, TeamAgent, TeamMessage, TeamRun, TeamTask } from './team-store.js';
 
 export interface AgentTeamSupervisorOptions {
@@ -445,6 +446,7 @@ export class AgentTeamSupervisor {
   }
 
   private buildPrompt(teamName: string, agent: TeamAgent, messages: TeamMessage[], tasks: TeamTask[]): string {
+    const teamContext = buildAgentTeamPromptContext(this.options.store, teamName) ?? '';
     const role = agent.role ? `Role: ${agent.role}` : 'Role: team member';
     const customPrompt = agent.prompt ? `\nMember instructions:\n${agent.prompt}\n` : '';
     const messageBlock = messages.length
@@ -462,6 +464,8 @@ export class AgentTeamSupervisor {
         `You are MetaBot Agent Team lead in team "${teamName}".`,
         role,
         customPrompt,
+        teamContext,
+        '',
         'You were woken in the background by Agent Team messages between user turns.',
         'Your response will be sent to the user as an Agent Activity card.',
         'Write only the final user-facing answer or concise status the user needs.',
@@ -480,6 +484,8 @@ export class AgentTeamSupervisor {
       `You are MetaBot Agent Team member "${agent.name}" in team "${teamName}".`,
       role,
       customPrompt,
+      teamContext,
+      '',
       'You run in an independent persistent chat session. Coordinate through the MetaBot teams CLI, not through user chat.',
       '',
       'Unread team messages:',

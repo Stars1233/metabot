@@ -99,6 +99,29 @@ warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 step()    { echo -e "\n${BOLD}==> $*${NC}"; }
 
+metabot_backup_existing_skill() {
+  local source="$1"
+  local backup_root="$2"
+  [[ -e "$source" || -L "$source" ]] || return 0
+  mkdir -p "$backup_root"
+  local backup
+  backup="$(mktemp -d "$backup_root/$(basename "$source").XXXXXX")"
+  rmdir "$backup"
+  mv "$source" "$backup"
+}
+
+metabot_install_skill_bundle() {
+  local source="$1"
+  local destination="$2"
+  local backup_root="$3"
+  if [[ -d "$destination" ]] && diff -qr "$source" "$destination" >/dev/null 2>&1; then
+    return 0
+  fi
+  metabot_backup_existing_skill "$destination" "$backup_root"
+  mkdir -p "$destination"
+  cp -R "$source/." "$destination/"
+}
+
 # Safe prompt — reads from /dev/tty, uses printf -v (no eval)
 prompt_input() {
   local varname="$1"
@@ -1121,21 +1144,27 @@ done
 # Install the complete MetaBot-owned skill bundles for Claude, Codex, and the
 # shared Agent Skills location used by Kimi Code 0.27+. Copying the full bundle
 # (rather than only SKILL.md) preserves required references and scripts.
-declare -a METABOT_SKILL_NAMES=("metabot" "metabot-team" "voice")
+declare -a METABOT_SKILL_NAMES=("metabot" "metabot-team")
 declare -a METABOT_SKILL_SOURCES=(
   "$METABOT_HOME/packages/skills/metabot"
   "$METABOT_HOME/packages/skills/metabot-team"
-  "$METABOT_HOME/src/skills/voice"
 )
 for skill_index in "${!METABOT_SKILL_NAMES[@]}"; do
   skill_name="${METABOT_SKILL_NAMES[$skill_index]}"
   skill_source="${METABOT_SKILL_SOURCES[$skill_index]}"
   info "Installing $skill_name skill..."
   for skill_root in "${GLOBAL_SKILL_ROOTS[@]}"; do
-    mkdir -p "$skill_root/$skill_name"
-    cp -R "$skill_source/." "$skill_root/$skill_name/"
+    metabot_install_skill_bundle "$skill_source" "$skill_root/$skill_name" "$HOME/.metabot/skill-backups"
     success "$skill_name skill installed → $skill_root/$skill_name"
   done
+done
+
+# The voice CLI remains available, but the standalone voice Skill is retired.
+for skill_root in "${GLOBAL_SKILL_ROOTS[@]}"; do
+  if [[ -e "$skill_root/voice" || -L "$skill_root/voice" ]]; then
+    metabot_backup_existing_skill "$skill_root/voice" "$HOME/.metabot/skill-backups"
+    info "Retired voice Skill from $skill_root"
+  fi
 done
 
 # Detect Feishu bots
@@ -1223,7 +1252,8 @@ else
   fi
 fi
 
-# Deploy skills + CLAUDE.md to bot working directory
+# Retire project-level MetaBot Skill mirrors and deploy only user-selected Lark
+# mirrors. Workspace instruction files are user-owned and never changed.
 if [[ -n "${DEPLOY_WORK_DIR:-}" ]]; then
   SKILLS_DEST="$DEPLOY_WORK_DIR/.claude/skills"
   CODEX_SKILLS_DEST="$DEPLOY_WORK_DIR/.codex/skills"
@@ -1234,18 +1264,26 @@ if [[ -n "${DEPLOY_WORK_DIR:-}" ]]; then
   # Clean up legacy skill bundles from a previously-deployed workspace so the
   # bot doesn't load stale skills after the Phase 4 consolidation.
   for legacy in metamemory skill-hub; do
-    if [[ -d "$SKILLS_DEST/$legacy" ]]; then
-      rm -rf "$SKILLS_DEST/$legacy"
-      info "Removed legacy $legacy from $SKILLS_DEST"
-    fi
+    for skill_dest in "${WORKSPACE_SKILL_ROOTS[@]}"; do
+      if [[ -e "$skill_dest/$legacy" || -L "$skill_dest/$legacy" ]]; then
+        metabot_backup_existing_skill "$skill_dest/$legacy" "$DEPLOY_WORK_DIR/.metabot/skill-backups"
+        info "Retired legacy $legacy from $skill_dest"
+      fi
+    done
   done
 
-  # Copy skills (common + lark-cli skills if Feishu).
-  # metaskill (agent-team generator) and metaschedule (persistent server-side
-  # scheduler) are no longer installed by default — copy them from
-  # $METABOT_HOME/src/skills/ if you want them. CC native CronCreate / /loop
-  # already cover ad-hoc, session-scoped scheduling.
-  DEPLOY_SKILLS="metabot metabot-team voice"
+  # MetaBot-owned Skills are global-only. Preserve and retire historical
+  # project copies so stale snapshots cannot shadow newer global Skills.
+  for SKILL in metabot metabot-team voice; do
+    for skill_dest in "${WORKSPACE_SKILL_ROOTS[@]}"; do
+      if [[ -e "$skill_dest/$SKILL" || -L "$skill_dest/$SKILL" ]]; then
+        metabot_backup_existing_skill "$skill_dest/$SKILL" "$DEPLOY_WORK_DIR/.metabot/skill-backups"
+        info "Retired project-level $SKILL mirror from $skill_dest"
+      fi
+    done
+  done
+
+  DEPLOY_SKILLS=""
   if [[ "$SETUP_LARK_CLI" == "true" ]]; then
     for lark_skill in lark-base lark-calendar lark-contact lark-doc lark-drive lark-event lark-im lark-mail lark-minutes lark-openapi-explorer lark-shared lark-sheets lark-skill-maker lark-task lark-vc lark-whiteboard lark-wiki lark-workflow-meeting-summary lark-workflow-standup-report; do
       [[ -d "$SKILLS_DIR/$lark_skill" ]] && DEPLOY_SKILLS="$DEPLOY_SKILLS $lark_skill"
@@ -1261,26 +1299,10 @@ if [[ -n "${DEPLOY_WORK_DIR:-}" ]]; then
     fi
   done
 
-  # Deploy CLAUDE.md to working directory (+ AGENTS.md symlink for Kimi engine)
-  if [[ -f "$METABOT_HOME/src/workspace/CLAUDE.md" ]]; then
-    if [[ -e "$DEPLOY_WORK_DIR/CLAUDE.md" || -L "$DEPLOY_WORK_DIR/CLAUDE.md" ]]; then
-      info "Preserved existing CLAUDE.md at $DEPLOY_WORK_DIR/CLAUDE.md"
-    else
-      cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$DEPLOY_WORK_DIR/CLAUDE.md"
-      success "Deployed CLAUDE.md → $DEPLOY_WORK_DIR/CLAUDE.md"
-    fi
-    # Kimi Code and Codex read AGENTS.md. Derive the compatibility link from
-    # the current (possibly user-customized) CLAUDE.md instead of overwriting it.
-    if [[ ! -e "$DEPLOY_WORK_DIR/AGENTS.md" && ! -L "$DEPLOY_WORK_DIR/AGENTS.md" ]]; then
-      (cd "$DEPLOY_WORK_DIR" && ln -s CLAUDE.md AGENTS.md 2>/dev/null) \
-        && success "Linked AGENTS.md → CLAUDE.md (for Kimi Code/Codex compatibility)" \
-        || warn "Could not create AGENTS.md symlink"
-    else
-      info "Preserved existing AGENTS.md at $DEPLOY_WORK_DIR/AGENTS.md"
-    fi
-  fi
+  rm -f "$DEPLOY_WORK_DIR/.metabot/workspace-harness.sha256"
+
 else
-  warn "Could not determine working directory, skipping workspace deployment"
+  warn "Could not determine working directory, skipping workspace mirror cleanup"
 fi
 
 # ============================================================================

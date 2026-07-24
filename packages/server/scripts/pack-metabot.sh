@@ -74,6 +74,9 @@ TAR_EXCLUDES=(
   '--exclude=*.tsbuildinfo'
   '--exclude=coverage'
   '--exclude=packages/server/static'
+  '--exclude=src/workspace'
+  '--exclude=src/skills/metabot-team'
+  '--exclude=src/skills/voice'
   '--exclude=.DS_Store'
   '--exclude=*.log'
 )
@@ -95,7 +98,6 @@ INCLUDES=(
   'packages/metamemory'
   'packages/skill-hub'
   'packages/skills'
-  'CLAUDE.md'
   'LICENSE'
   'README.md'
 )

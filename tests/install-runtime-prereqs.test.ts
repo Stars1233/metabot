@@ -41,7 +41,7 @@ version_at_least v23.0.0 22.19.0
     }
   });
 
-  it('mirrors MetaBot skills to user and workspace Agent Skills roots', () => {
+  it('installs MetaBot Skills globally and retires project mirrors', () => {
     expect(SH_SOURCE).toContain('AGENTS_SKILLS_DIR="$HOME/.agents/skills"');
     expect(SH_SOURCE).toContain('AGENTS_SKILLS_DEST="$DEPLOY_WORK_DIR/.agents/skills"');
     expect(PS_SOURCE).toContain('$AgentsSkillsDir = Join-Path $env:USERPROFILE ".agents\\skills"');
@@ -50,13 +50,17 @@ version_at_least v23.0.0 22.19.0
     for (const source of [SH_SOURCE, PS_SOURCE]) {
       expect(source.replaceAll('\\', '/')).toContain('packages/skills/metabot');
       expect(source).toContain('metabot-team');
+      expect(source).toContain('Retired project-level');
     }
   });
 
-  it('preserves workspace instructions and derives AGENTS.md from the current CLAUDE.md', () => {
-    expect(SH_SOURCE).toContain('Preserved existing CLAUDE.md');
-    expect(SH_SOURCE).toContain('ln -s CLAUDE.md AGENTS.md');
-    expect(PS_SOURCE).toContain('Preserved existing CLAUDE.md');
-    expect(PS_SOURCE).toContain('Copy-Item $deployClaude $workspaceAgents -Force');
+  it('leaves AGENTS.md and CLAUDE.md user-owned', () => {
+    for (const source of [SH_SOURCE, PS_SOURCE]) {
+      expect(source).not.toContain('src/workspace/CLAUDE.md');
+      expect(source).not.toContain('src/workspace/AGENTS.md');
+      expect(source).not.toContain('ln -s CLAUDE.md AGENTS.md');
+      expect(source).not.toContain('Copy-Item $deployClaude $workspaceAgents -Force');
+      expect(source).toContain('workspace-harness.sha256');
+    }
   });
 });

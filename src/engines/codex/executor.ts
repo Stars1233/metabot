@@ -11,6 +11,7 @@ import type {
   ExecutorOptions,
   SDKMessage,
 } from '../claude/executor.js';
+import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import {
   createCodexTranslatorState,
   translateCodexJsonEvent,
@@ -478,9 +479,9 @@ export class CodexExecutor {
     }
 
     if (apiContext) {
-      sections.push(
-        `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
-      );
+      sections.push(buildMetaBotApiPromptContext(apiContext));
+
+      if (apiContext.teamContext) sections.push(apiContext.teamContext);
 
       if (apiContext.groupMembers && apiContext.groupMembers.length > 0) {
         const others = apiContext.groupMembers.filter((m) => m !== apiContext.botName);

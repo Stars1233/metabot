@@ -9,13 +9,14 @@
 # Installs:
 #   - `metabot` on PATH (npm global or ~/.local fallback)
 #   - $HOME/.metabot-core/token (chmod 600) if METABOT_CORE_TOKEN was set
-#   - $HOME/.claude/skills/metabot/  (Claude / Kimi skill discovery path)
-#   - $HOME/.codex/skills/metabot/   (Codex skill discovery path)
+#   - user-global Claude, Codex, and Kimi/Agent Skill discovery paths
 #
 # Engine selection:
 #   --engine claude|codex|both       which skill path(s) to populate
 #   METABOT_CLI_ENGINE=…             env equivalent; flag wins
-# Default: both. Same SKILL.md/README.md source for every engine.
+# Default: both. The complete bundled Skill is copied to every supported
+# user-global discovery root; existing custom copies are backed up outside
+# discovery roots.
 #
 # Does NOT install the Feishu bridge / bots.json / PM2 / engines. That path is
 # the full GitLab-based `install.sh` at the repo root.
@@ -49,9 +50,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$ENGINE" in
-  claude|codex|both) ;;
+  claude|codex|kimi|all|both) ;;
   *)
-    printf 'error: --engine must be claude|codex|both (got %q)\n' "$ENGINE" >&2
+    printf 'error: --engine must be claude|codex|kimi|all|both (got %q)\n' "$ENGINE" >&2
     exit 1
     ;;
 esac
@@ -78,7 +79,7 @@ fi
 # --- Step 2: download tarball ----------------------------------------------
 info "Downloading $TARBALL_URL"
 if ! curl -fsSL "$TARBALL_URL" -o "$TARBALL_TMP"; then
-  fail "failed to download tarball from $TARBALL_URL — VPN connected? Server up?"
+  fail "failed to download tarball from $TARBALL_URL — is the configured Core reachable?"
 fi
 if [[ ! -s "$TARBALL_TMP" ]]; then
   fail "downloaded tarball is empty"
@@ -159,15 +160,18 @@ install_skill_to() {
     return
   fi
   mkdir -p "$parent"
-  if [[ -d "$dst" ]]; then
-    local src_hash dst_hash
-    src_hash="$(find "$SKILL_SRC" -type f -name '*.md' -print0 | sort -z | xargs -0 cat | sha256sum | cut -d' ' -f1)"
-    dst_hash="$(find "$dst" -type f -name '*.md' -print0 | sort -z | xargs -0 cat 2>/dev/null | sha256sum | cut -d' ' -f1)"
-    if [[ "$src_hash" != "$dst_hash" ]]; then
-      local backup="$dst.bak.$(date +%s)"
-      mv "$dst" "$backup"
-      info "backed up existing skill → $backup"
-    fi
+  if [[ -d "$dst" ]] && diff -qr "$SKILL_SRC" "$dst" >/dev/null 2>&1; then
+    info "current /metabot skill already installed → $dst"
+    return
+  fi
+  if [[ -e "$dst" || -L "$dst" ]]; then
+    local backup_root="$HOME/.metabot/skill-backups"
+    local backup
+    mkdir -p "$backup_root"
+    backup="$(mktemp -d "$backup_root/metabot.XXXXXX")"
+    rmdir "$backup"
+    mv "$dst" "$backup"
+    info "backed up existing skill → $backup"
   fi
   mkdir -p "$dst"
   cp -R "$SKILL_SRC/." "$dst/"
@@ -177,8 +181,11 @@ install_skill_to() {
 if [[ "$ENGINE" == "claude" || "$ENGINE" == "both" ]]; then
   install_skill_to "$HOME/.claude/skills/metabot"
 fi
-if [[ "$ENGINE" == "codex" || "$ENGINE" == "both" ]]; then
+if [[ "$ENGINE" == "codex" || "$ENGINE" == "all" || "$ENGINE" == "both" ]]; then
   install_skill_to "$HOME/.codex/skills/metabot"
+fi
+if [[ "$ENGINE" == "kimi" || "$ENGINE" == "all" || "$ENGINE" == "both" ]]; then
+  install_skill_to "$HOME/.agents/skills/metabot"
 fi
 
 # --- Step 7: self-check ----------------------------------------------------
@@ -228,5 +235,6 @@ echo
 case "$ENGINE" in
   claude) echo "Engine: claude  (skill at ~/.claude/skills/metabot)" ;;
   codex)  echo "Engine: codex   (skill at ~/.codex/skills/metabot)"  ;;
-  both)   echo "Engine: both    (skill at ~/.claude/skills/metabot + ~/.codex/skills/metabot)" ;;
+  kimi)   echo "Engine: kimi    (skill at ~/.agents/skills/metabot)" ;;
+  all|both) echo "Engine: all     (skill in Claude, Codex, and Agent discovery roots)" ;;
 esac

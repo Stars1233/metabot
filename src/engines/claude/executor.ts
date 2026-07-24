@@ -8,7 +8,11 @@ import type { BotConfigBase } from '../../config.js';
 import type { CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import { buildMetaBotApiPromptContext } from '../prompt-context.js';
+import type { ApiContext } from '../prompt-context.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
+
+export type { ApiContext } from '../prompt-context.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -156,15 +160,6 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
 
     return child as unknown as SpawnedProcess;
   };
-}
-
-export interface ApiContext {
-  botName: string;
-  chatId: string;
-  /** Group chat member names — enables inter-bot communication prompt. */
-  groupMembers?: string[];
-  /** Group ID — used to build grouptalk chatIds for inter-bot communication. */
-  groupId?: string;
 }
 
 /**
@@ -370,9 +365,9 @@ export class ClaudeExecutor {
       // botName and chatId are per-session — inject into system prompt to avoid
       // race conditions when multiple chats run concurrently.
       // Port and secret are already set as METABOT_* env vars in config.ts.
-      appendSections.push(
-        `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`
-      );
+      appendSections.push(buildMetaBotApiPromptContext(apiContext));
+
+      if (apiContext.teamContext) appendSections.push(apiContext.teamContext);
 
       // Agent Teams namespace guidance: the team config lives at
       // ~/.claude/teams/{name}/, which is shared across all bots and chats

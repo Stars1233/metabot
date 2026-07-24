@@ -67,6 +67,23 @@ function Write-Warn    { param([string]$Message) Write-Host "[WARN] " -Foregroun
 function Write-Err     { param([string]$Message) Write-Host "[ERROR] " -ForegroundColor Red -NoNewline; Write-Host $Message }
 function Write-Step    { param([string]$Message) Write-Host ""; Write-Host "==> $Message" -ForegroundColor White }
 
+function Backup-SkillPath {
+    param([string]$Source, [string]$BackupRoot)
+    if (-not (Test-Path -LiteralPath $Source)) { return }
+    New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+    $backup = Join-Path $BackupRoot ("{0}.{1}" -f (Split-Path $Source -Leaf), [guid]::NewGuid().ToString("N"))
+    Move-Item -LiteralPath $Source -Destination $backup
+}
+
+function Install-SkillBundle {
+    param([string]$Source, [string]$Destination, [string]$BackupRoot)
+    if (Test-Path -LiteralPath $Destination) {
+        Backup-SkillPath $Destination $BackupRoot
+    }
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Destination $Destination -Recurse -Force
+}
+
 function Read-Input {
     param(
         [string]$Prompt,
@@ -683,7 +700,6 @@ $GlobalSkillRoots = @($SkillsDir, $CodexSkillsDir, $AgentsSkillsDir)
 $MetaBotSkillSources = [ordered]@{
     "metabot" = (Join-Path $MetabotHome "packages\skills\metabot")
     "metabot-team" = (Join-Path $MetabotHome "packages\skills\metabot-team")
-    "voice" = (Join-Path $MetabotHome "src\skills\voice")
 }
 
 # Install complete MetaBot-owned bundles for Claude, Codex, and Kimi Code's
@@ -699,9 +715,13 @@ foreach ($skillRoot in $GlobalSkillRoots) {
     New-Item -ItemType Directory -Path $skillRoot -Force | Out-Null
     foreach ($skillName in $MetaBotSkillSources.Keys) {
         $skillDestination = Join-Path $skillRoot $skillName
-        New-Item -ItemType Directory -Path $skillDestination -Force | Out-Null
-        Get-ChildItem -LiteralPath ($MetaBotSkillSources[$skillName]) -Force | Copy-Item -Destination $skillDestination -Recurse -Force
+        Install-SkillBundle $MetaBotSkillSources[$skillName] $skillDestination (Join-Path $env:USERPROFILE ".metabot\skill-backups")
         Write-Success "$skillName installed -> $skillDestination"
+    }
+    $voiceDestination = Join-Path $skillRoot "voice"
+    if (Test-Path -LiteralPath $voiceDestination) {
+        Backup-SkillPath $voiceDestination (Join-Path $env:USERPROFILE ".metabot\skill-backups")
+        Write-Info "Retired voice Skill from $skillRoot"
     }
 }
 
@@ -737,18 +757,34 @@ if (-not $SkipConfig) {
     }
 }
 
-# Deploy skills + CLAUDE.md to bot working directory
+# Deploy selected Skills to the bot working directory. Workspace instruction
+# files are user-owned and are never created or changed by the installer.
 if ($DeployWorkDir) {
     $SkillsDest = Join-Path $DeployWorkDir ".claude\skills"
     $CodexSkillsDest = Join-Path $DeployWorkDir ".codex\skills"
     $AgentsSkillsDest = Join-Path $DeployWorkDir ".agents\skills"
     $WorkspaceSkillRoots = @($SkillsDest, $CodexSkillsDest, $AgentsSkillsDest)
 
-    # metaskill (agent-team generator) and metaschedule (persistent server-side
-    # scheduler) are no longer deployed by default -- copy them from
-    # $MetabotHome\src\skills\ if needed. CC native CronCreate / /loop already
-    # cover ad-hoc, session-scoped scheduling.
-    $deploySkills = @("metabot", "metabot-team", "voice")
+    # MetaBot-owned Skills are global-only. Preserve and retire historical
+    # project mirrors so stale snapshots cannot shadow current global Skills.
+    $WorkspaceSkillBackup = Join-Path $DeployWorkDir ".metabot\skill-backups"
+    foreach ($workspaceSkillRoot in $WorkspaceSkillRoots) {
+        New-Item -ItemType Directory -Path $workspaceSkillRoot -Force | Out-Null
+        foreach ($skill in @("metabot", "metabot-team", "voice")) {
+            $skillDst = Join-Path $workspaceSkillRoot $skill
+            $skillItem = Get-Item -LiteralPath $skillDst -Force -ErrorAction SilentlyContinue
+            if ($null -ne $skillItem) {
+                New-Item -ItemType Directory -Path $WorkspaceSkillBackup -Force | Out-Null
+                $stamp = Get-Date -Format "yyyyMMddHHmmssfff"
+                $backupName = "$skill.$stamp.$([guid]::NewGuid().ToString('N'))"
+                Move-Item -LiteralPath $skillDst -Destination (Join-Path $WorkspaceSkillBackup $backupName)
+                Write-Info "Retired project-level $skill mirror from $workspaceSkillRoot"
+            }
+        }
+    }
+
+    # Only user-selected integration Skills are mirrored into the workspace.
+    $deploySkills = @()
     if ($HasFeishu) { $deploySkills += "feishu-doc" }
 
     foreach ($skill in $deploySkills) {
@@ -763,26 +799,10 @@ if ($DeployWorkDir) {
         }
     }
 
-    # Deploy CLAUDE.md to working directory
-    $workspaceClaude = Join-Path $MetabotHome "src\workspace\CLAUDE.md"
-    if (Test-Path $workspaceClaude) {
-        $deployClaude = Join-Path $DeployWorkDir "CLAUDE.md"
-        if (Test-Path $deployClaude) {
-            Write-Info "Preserved existing CLAUDE.md at $deployClaude"
-        } else {
-            Copy-Item $workspaceClaude $deployClaude -Force
-            Write-Success "Deployed CLAUDE.md -> $deployClaude"
-        }
-        $workspaceAgents = Join-Path $DeployWorkDir "AGENTS.md"
-        if (-not (Test-Path $workspaceAgents)) {
-            Copy-Item $deployClaude $workspaceAgents -Force
-            Write-Success "Deployed AGENTS.md -> $workspaceAgents (Kimi Code/Codex)"
-        } else {
-            Write-Info "Preserved existing AGENTS.md at $workspaceAgents"
-        }
-    }
+    Remove-Item (Join-Path $DeployWorkDir ".metabot\workspace-harness.sha256") -Force -ErrorAction SilentlyContinue
+
 } else {
-    Write-Warn "Could not determine working directory, skipping workspace deployment"
+    Write-Warn "Could not determine working directory, skipping workspace mirror cleanup"
 }
 
 # Install CLI tools with .cmd wrappers for CMD/PowerShell
