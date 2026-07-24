@@ -80,7 +80,7 @@ Do not reuse the Core token as the Bridge secret.
 
 ```bash
 metabot update                                  # latest verified release
-metabot update --package --version 1.2.0        # known immutable release
+metabot update --package --version 1.3.0        # known immutable release
 metabot doctor
 ```
 

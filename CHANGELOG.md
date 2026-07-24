@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-24
+
+### Added
+
+- The repository now ships a concise root `AGENTS.md` baseline for public contributors while preserving user-owned workspace `AGENTS.md` and `CLAUDE.md` files during install and package updates.
+- Agent prompts now include dynamic Current MetaBot Context and compact Team Context sections consistently across Codex, Kimi Code, and Claude compatibility paths.
+
+### Changed
+
+- The packaged `metabot` and `metabot-team` Skills are now the canonical CLI and durable-state references, without duplicate source mirrors or workspace policy.
+- The documentation site has a redesigned landing page and a unified theme across inner pages, with outdated Personal Edition pages removed from navigation.
+- GitHub Actions now test supported Node.js 22 and use Node.js 24-compatible action runtimes.
+
 ## [1.2.0] - 2026-07-19
 
 ### Added

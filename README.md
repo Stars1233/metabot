@@ -173,7 +173,7 @@ Skills、T5T、Teams 和 CLI Access 共用同一 Token 与同一套导航。
 | `/background <提示>`                           | 在 Chat 继续使用时运行受支持的后台任务           |
 | `@Bot /group-reply mention\|all\|status`       | 控制一个飞书 Bot 在一个群里的回复模式            |
 | `metabot update`                               | 将 Package 管理的个人版升级到最新 GitHub Release |
-| `metabot update --package --version 1.2.0`     | 精确安装不可变的 v1.2.0 Release 包               |
+| `metabot update --package --version 1.3.0`     | 精确安装不可变的 v1.3.0 Release 包               |
 
 完整命令详见[聊天命令](docs/usage/chat-commands.zh.md)、[CLI 参考](docs/reference/cli-metabot.zh.md)和 [REST API](docs/reference/api.zh.md)。
 
@@ -192,7 +192,7 @@ Release。需要可复现版本时可固定不可变 Release；源码 checkout �
 
 ```bash
 metabot update                                  # 最新 GitHub Release
-metabot update --package --version 1.2.0        # 精确安装 v1.2.0
+metabot update --package --version 1.3.0        # 精确安装 v1.3.0
 metabot update --git                            # 源码 checkout
 ```
 
