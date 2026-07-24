@@ -1,6 +1,7 @@
 import type { BotConfigBase } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import type { ApiContext, ExecutionHandle, ExecutorOptions, SDKMessage } from '../claude/executor.js';
+import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import {
   KimiDaemonClient,
   type KimiPendingQuestion,
@@ -323,9 +324,8 @@ export class KimiExecutor {
       );
     }
     if (apiContext) {
-      sections.push(
-        `## MetaBot\nYou are Agent "${apiContext.botName}" in chat "${apiContext.chatId}". Use the metabot skill and CLI for Memory, T5T, Agent Bus, and Agent Teams.`,
-      );
+      sections.push(buildMetaBotApiPromptContext(apiContext));
+      if (apiContext.teamContext) sections.push(apiContext.teamContext);
       if (apiContext.groupMembers?.length) {
         const peers = apiContext.groupMembers.filter((name) => name !== apiContext.botName);
         if (peers.length) sections.push(`## Agent Organization\nOther Agents in this group: ${peers.join(', ')}.`);

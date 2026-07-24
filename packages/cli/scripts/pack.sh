@@ -7,7 +7,7 @@
 # Inputs (resolved at runtime):
 #   - packages/cli/src/index.ts (+ scripts/standalone-entry.ts wrapper)
 #   - packages/cli/install-cli.sh
-#   - packages/skills/metabot/{SKILL.md,README.md}
+#   - packages/skills/metabot/ (complete Skill bundle)
 #   - root package.json version
 #
 # Outputs:
@@ -71,9 +71,8 @@ cat > "$STAGE_DIR/package.json" <<EOF
 }
 EOF
 
-echo "==> Copying bundled skill (metabot SKILL.md + README)"
-cp "$SKILL_SRC_DIR/SKILL.md" "$STAGE_DIR/skills/metabot/SKILL.md"
-cp "$SKILL_SRC_DIR/README.md" "$STAGE_DIR/skills/metabot/README.md"
+echo "==> Copying complete bundled metabot Skill"
+cp -R "$SKILL_SRC_DIR/." "$STAGE_DIR/skills/metabot/"
 
 echo "==> Running npm pack in stage dir"
 mkdir -p "$SERVER_STATIC_DIR"

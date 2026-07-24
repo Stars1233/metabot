@@ -53,6 +53,7 @@ import { SlashPickerController } from './slash-picker-controller.js';
 import { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 import type { AgentTeamStore } from '../agent-teams/team-store.js';
 import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
+import { buildAgentTeamPromptContextForChat } from '../agent-teams/prompt-context.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 export { normalizePromptForEngine } from './prompt-normalizer.js';
@@ -2001,7 +2002,15 @@ export class MessageBridge {
       return;
     }
 
-    const apiContext = { botName: this.config.name, chatId };
+    const buildApiContext = (): ApiContext => ({
+      botName: this.config.name,
+      chatId,
+      engine: engineName,
+      sessionId: this.sessionManager.getSession(chatId).sessionId,
+      teamContext: this.agentTeamStore
+        ? buildAgentTeamPromptContextForChat(this.agentTeamStore, chatId)
+        : undefined,
+    });
 
     const rateLimiter = new RateLimiter(1500);
 
@@ -2061,7 +2070,7 @@ export class MessageBridge {
       cwd,
       abortController,
       outputsDir,
-      apiContext,
+      apiContext: buildApiContext(),
       model: session.model,
       onTeamEvent,
     });
@@ -2301,7 +2310,7 @@ export class MessageBridge {
         // sessionId; without release, acquire would return the same broken
         // instance).
         const retryHandle = await this.runOneTurn(chatId, engineName, {
-          prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+          prompt, cwd, abortController, outputsDir, apiContext: buildApiContext(), model: session.model,
           onTeamEvent, freshSession: true,
         });
         executionHandle.finish();
@@ -2328,7 +2337,7 @@ export class MessageBridge {
         await this.sender.updateCard(messageId, { ...lastState, responseText: '_Context limit reached, starting fresh session..._' });
 
         const retryHandle = await this.runOneTurn(chatId, engineName, {
-          prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+          prompt, cwd, abortController, outputsDir, apiContext: buildApiContext(), model: session.model,
           onTeamEvent, freshSession: true,
         });
         executionHandle.finish();
@@ -2409,7 +2418,7 @@ export class MessageBridge {
 
         try {
           const retryHandle = await this.runOneTurn(chatId, engineName, {
-            prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+            prompt, cwd, abortController, outputsDir, apiContext: buildApiContext(), model: session.model,
             onTeamEvent, freshSession: true,
           });
           executionHandle.finish();
@@ -2545,7 +2554,17 @@ export class MessageBridge {
     const effectiveMessageId = messageId || `api-${chatId}-${Date.now()}`;
     options.onUpdate?.(initialState, effectiveMessageId, false);
 
-    const apiContext = { botName: this.config.name, chatId, groupMembers: options.groupMembers, groupId: options.groupId };
+    const buildApiContext = (): ApiContext => ({
+      botName: this.config.name,
+      chatId,
+      engine: engineName,
+      sessionId: this.sessionManager.getSession(chatId).sessionId,
+      teamContext: this.agentTeamStore
+        ? buildAgentTeamPromptContextForChat(this.agentTeamStore, chatId)
+        : undefined,
+      groupMembers: options.groupMembers,
+      groupId: options.groupId,
+    });
 
     // Forward-declare for the onTeamEvent closure below (only assigned once;
     // const cannot be uninitialised — see same pattern in executeQuery).
@@ -2580,7 +2599,7 @@ export class MessageBridge {
       cwd,
       abortController,
       outputsDir,
-      apiContext,
+      apiContext: buildApiContext(),
       maxTurns: options.maxTurns,
       model: options.model ?? session.model,
       allowedTools: options.allowedTools,
@@ -2727,7 +2746,7 @@ export class MessageBridge {
         }
 
         const retryHandle = await this.runOneTurn(chatId, engineName, {
-          prompt, cwd, abortController, outputsDir, apiContext,
+          prompt, cwd, abortController, outputsDir, apiContext: buildApiContext(),
           model: options.model ?? session.model,
           onTeamEvent, freshSession: true,
         });
@@ -2807,7 +2826,7 @@ export class MessageBridge {
 
         try {
           const retryHandle = await this.runOneTurn(chatId, engineName, {
-            prompt, cwd, abortController, outputsDir, apiContext,
+            prompt, cwd, abortController, outputsDir, apiContext: buildApiContext(),
             model: options.model ?? session.model,
             onTeamEvent, freshSession: true,
           });

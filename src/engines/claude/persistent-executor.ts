@@ -35,6 +35,7 @@ import type { SDKUserMessage, SpawnOptions, SpawnedProcess, Query } from '@anthr
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
+import { buildMetaBotApiPromptContext } from '../prompt-context.js';
 import { apply1MContextSettings } from './executor.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { ptyQuery } from './pty/pty-query.js';
@@ -441,9 +442,8 @@ export class PersistentClaudeExecutor extends EventEmitter {
     }
     if (this.options.apiContext) {
       const ctx = this.options.apiContext;
-      appendSections.push(
-        `## MetaBot API\nYou are running as bot "${ctx.botName}" in chat "${ctx.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
-      );
+      appendSections.push(buildMetaBotApiPromptContext(ctx));
+      if (ctx.teamContext) appendSections.push(ctx.teamContext);
       if (ctx.groupMembers && ctx.groupMembers.length > 0) {
         const others = ctx.groupMembers.filter((m) => m !== ctx.botName);
         if (ctx.groupId) {

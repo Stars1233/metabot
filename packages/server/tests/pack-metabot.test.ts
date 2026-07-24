@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 // tests must never overwrite the real publishable artifacts.
 
 const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const REPO_ROOT = path.resolve(PKG_DIR, '../..');
 const SCRIPT = path.join(PKG_DIR, 'scripts', 'pack-metabot.sh');
 const OUT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-pack-test-'));
 const TARBALL_PATH = path.join(OUT_DIR, 'latest.tgz');
@@ -133,13 +134,31 @@ describe('pack-metabot.sh', () => {
   it('tarball includes the packaged skill bundles', () => {
     expect(tarListing).toContain('packages/skills/metabot/SKILL.md');
     expect(tarListing).toContain('packages/skills/metabot-team/SKILL.md');
+    for (const reference of ['memory', 'skills', 'agents', 't5t', 'runtime']) {
+      expect(tarListing).toContain(`packages/skills/metabot/references/${reference}.md`);
+    }
+    expect(tarListing).not.toContain('packages/skills/metabot/README.md');
+    expect(tarListing).not.toContain('packages/skills/metabot-team/README.md');
+    expect(tarListing).not.toContain('src/skills/metabot-team/');
   });
 
-  it('tarball includes engine sources and workspace skills', () => {
+  it('tarball includes engine sources without workspace or retired Skill mirrors', () => {
     expect(tarListing).toMatch(/(^|\n)\.?\/?src\//);
-    // Voice skill is bundled inside src/skills/ — covered by the prefix match
-    // above, but call it out explicitly to guard against future src/ slimming.
-    expect(tarListing).toContain('src/skills/voice/SKILL.md');
+    expect(tarListing).not.toContain('src/skills/voice/');
+    expect(tarListing).not.toMatch(/(^|\n)\.?\/?AGENTS\.md$/m);
+    expect(tarListing).not.toMatch(/(^|\n)\.?\/?CLAUDE\.md$/m);
+    expect(tarListing).not.toContain('src/workspace/');
+  });
+
+  it('packaged MetaBot Skills contain CLI definitions without workspace policy', () => {
+    const bundle = [
+      fs.readFileSync(path.join(REPO_ROOT, 'packages/skills/metabot/SKILL.md'), 'utf-8'),
+      fs.readFileSync(path.join(REPO_ROOT, 'packages/skills/metabot-team/SKILL.md'), 'utf-8'),
+    ].join('\n');
+    expect(bundle).not.toMatch(/\b(?:subagent|spawn_agent|harness)\b/i);
+    expect(bundle).not.toMatch(/\b(?:code review|ci\/cd|pull request)\b/i);
+    expect(bundle).toContain('CLI and durable-state');
+    expect(bundle).toContain('does not define Agent execution policy');
   });
 
   it('tarball excludes central-only workspaces (server, web-ui)', () => {
