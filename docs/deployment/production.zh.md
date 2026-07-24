@@ -76,7 +76,7 @@ Shell 历史或共享配置。
 
 ```bash
 metabot update                                  # 最新已校验 Release
-metabot update --package --version 1.2.0        # 已知不可变 Release
+metabot update --package --version 1.3.0        # 已知不可变 Release
 metabot doctor
 ```
 

@@ -20,7 +20,7 @@ Installed automatically by the MetaBot installer to `~/.local/bin/metabot`.
 ```bash
 metabot update                                  # package install: latest GitHub Release
 metabot update --package                        # force latest GitHub Release package
-metabot update --package --version 1.2.0        # pin immutable Release v1.2.0
+metabot update --package --version 1.3.0        # pin immutable Release v1.3.0
 metabot update --git                            # force git pull + rebuild + restart
 metabot start                       # start with PM2
 metabot stop                        # stop
@@ -33,7 +33,7 @@ For a normal package-managed personal edition, `metabot update` defaults to the
 latest GitHub Release. A source checkout is auto-detected and keeps its Git
 update path; use `--package` to force a Release overlay.
 
-`metabot update --package --version 1.2.0` selects the immutable v1.2.0 assets
+`metabot update --package --version 1.3.0` selects the immutable v1.3.0 assets
 instead of `latest`. Package updating performs:
 
 1. Download `install.sh`, `metabot-runtime.tgz`, and `SHA256SUMS` from the latest or pinned GitHub Release.

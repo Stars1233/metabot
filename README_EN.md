@@ -176,7 +176,7 @@ Each bot has its own channel credentials, engine, workspace, and sessions. Bots 
 | `/background <prompt>`                         | Run a supported background task while the chat continues               |
 | `@Bot /group-reply mention\|all\|status`       | Control one Feishu bot's reply mode in one group                       |
 | `metabot update`                               | Update a package-managed personal edition to the latest GitHub Release |
-| `metabot update --package --version 1.2.0`     | Install exactly the immutable v1.2.0 Release package                   |
+| `metabot update --package --version 1.3.0`     | Install exactly the immutable v1.3.0 Release package                   |
 
 See [Chat Commands](docs/usage/chat-commands.md), the [CLI Reference](docs/reference/cli-metabot.md), and the [REST API](docs/reference/api.md) for the complete surfaces.
 
@@ -195,7 +195,7 @@ source checkouts retain an explicit Git path:
 
 ```bash
 metabot update                                  # latest GitHub Release
-metabot update --package --version 1.2.0        # exactly v1.2.0
+metabot update --package --version 1.3.0        # exactly v1.3.0
 metabot update --git                            # source checkout
 ```
 

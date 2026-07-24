@@ -91,7 +91,7 @@ metabot doctor
 需要可复现回退时，显式安装已知版本：
 
 ```bash
-metabot update --package --version 1.2.0
+metabot update --package --version 1.3.0
 ```
 
 更新会保留 `.env`、`bots.json`、`data/`、`logs/`、`~/.metabot/` 和
