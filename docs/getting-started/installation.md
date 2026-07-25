@@ -136,5 +136,11 @@ for the `metabot` CLI. It requires Git for Windows. The complete local
 Core/Web UI lifecycle remains provided by the Linux/macOS Release installer
 until Windows reaches packaging parity.
 
+The installer fails if dependency installation, the build, or PM2 startup
+fails, and waits for the Bridge health endpoint at `http://127.0.0.1:9100/api/health`.
+On failure it prints only bounded PM2 and log diagnostics. It does not install,
+stop, or delete a Core/MetaMemory service. Configure an existing Core with
+`METABOT_CORE_URL` and `METABOT_CORE_TOKEN`; standalone port `8100` is obsolete.
+
 Next: [Quick Setup](quick-setup.md) or the detailed
 [Feishu App Setup](feishu-app-setup.md).

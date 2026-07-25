@@ -131,4 +131,10 @@ PowerShell 安装器会配置 Bridge，并为 `metabot` CLI 安装 `.cmd` wrappe
 Git for Windows。完整本地 Core/Web UI 生命周期目前仍由 Linux/macOS Release
 安装器提供，直到 Windows 打包能力达到同等水平。
 
+依赖安装、构建或 PM2 启动失败时，安装器会立即失败；启动后还会等待
+`http://127.0.0.1:9100/api/health` 返回成功。失败诊断只输出有限行数的
+PM2 信息和日志。PowerShell 安装器不会安装、停止或删除 Core/MetaMemory
+服务；请通过 `METABOT_CORE_URL` 和 `METABOT_CORE_TOKEN` 连接已有 Core，
+旧的独立 `8100` 端口已废弃。
+
 下一步：[快速配置](quick-setup.md)或详细的[飞书应用配置](feishu-app-setup.md)。
