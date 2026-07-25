@@ -82,6 +82,28 @@ function makeSender() {
   return sender;
 }
 
+function deferFirstSendCard(sender: ReturnType<typeof makeSender>) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let markEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    markEntered = resolve;
+  });
+  const originalSendCard = sender.sendCard.bind(sender);
+  let calls = 0;
+  sender.sendCard = async (chatId: string, state: CardState) => {
+    calls += 1;
+    if (calls === 1) {
+      markEntered();
+      await gate;
+    }
+    return originalSendCard(chatId, state);
+  };
+  return { entered, release };
+}
+
 describe('isStaleSessionError', () => {
   it('matches the GitHub issue error text', () => {
     expect(
@@ -257,6 +279,208 @@ describe('MessageBridge between-turn questions', () => {
     });
 
     expect(handledTexts).toEqual(['/reset']);
+  });
+
+  it('queues a follow-up while the first task is still starting', async () => {
+    let releaseInitialCard!: () => void;
+    const initialCardGate = new Promise<void>((resolve) => {
+      releaseInitialCard = resolve;
+    });
+    let releaseFirstStream!: () => void;
+    const firstStreamGate = new Promise<void>((resolve) => {
+      releaseFirstStream = resolve;
+    });
+
+    const sender = makeSender();
+    const originalSendCard = sender.sendCard.bind(sender);
+    let sendCardCalls = 0;
+    sender.sendCard = async (chatId: string, state: CardState) => {
+      sendCardCalls += 1;
+      if (sendCardCalls === 1) await initialCardGate;
+      return originalSendCard(chatId, state);
+    };
+    const notices: Array<{ title: string; content: string }> = [];
+    sender.sendTextNotice = async (_chatId: string, title: string, content: string) => {
+      notices.push({ title, content });
+    };
+
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    let turnCount = 0;
+    bridge.runOneTurn = vi.fn(async () => {
+      turnCount += 1;
+      const currentTurn = turnCount;
+      return {
+        stream: (async function* () {
+          if (currentTurn === 1) await firstStreamGate;
+          yield {
+            type: 'result',
+            subtype: 'success',
+            result: currentTurn === 1 ? 'first done' : 'second done',
+          };
+        })(),
+        finish: vi.fn(),
+        resolveQuestion: vi.fn(),
+      };
+    });
+
+    const first = bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: 'first',
+    });
+
+    await bridge.handleMessage({
+      messageId: 'm2',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: 'second',
+    });
+
+    expect(bridge.runOneTurn).not.toHaveBeenCalled();
+    expect(bridge.messageQueues.get('chat-1')).toMatchObject([{ text: 'second' }]);
+    expect(notices.at(-1)?.title).toBe('📋 Queued');
+
+    releaseInitialCard();
+    await vi.waitFor(() => expect(bridge.runOneTurn).toHaveBeenCalledTimes(1));
+    expect(bridge.messageQueues.get('chat-1')).toMatchObject([{ text: 'second' }]);
+
+    releaseFirstStream();
+    await first;
+    await vi.waitFor(() => expect(bridge.runOneTurn).toHaveBeenCalledTimes(2));
+
+    expect(bridge.runOneTurn.mock.calls.map((call: any[]) => call[2].prompt)).toEqual(['first', 'second']);
+    expect(bridge.messageQueues.has('chat-1')).toBe(false);
+    bridge.destroy();
+  });
+
+  it('cancels a deferred task start when /stop arrives before engine execution', async () => {
+    const sender = makeSender();
+    const notices: Array<{ title: string; content: string }> = [];
+    sender.sendTextNotice = async (_chatId: string, title: string, content: string) => {
+      notices.push({ title, content });
+    };
+    const { entered, release } = deferFirstSendCard(sender);
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    bridge.runOneTurn = vi.fn();
+
+    const first = bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: 'first',
+    });
+    await entered;
+
+    await bridge.handleMessage({
+      messageId: 'm-status',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '/status',
+    });
+    expect(notices.at(-1)?.content).toContain('**Running:** Yes');
+
+    await bridge.handleMessage({
+      messageId: 'm-stop',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '/stop',
+    });
+    release();
+    await first;
+
+    expect(notices.at(-1)?.title).toContain('Stopped');
+    expect(bridge.runOneTurn).not.toHaveBeenCalled();
+    expect(sender.updated.at(-1)?.state).toMatchObject({
+      status: 'error',
+      errorMessage: 'Task was cancelled',
+    });
+    expect(bridge.isBusy('chat-1')).toBe(false);
+    bridge.destroy();
+  });
+
+  it('cancels a deferred task start when /reset arrives before engine execution', async () => {
+    const sender = makeSender();
+    const notices: Array<{ title: string; content: string }> = [];
+    sender.sendTextNotice = async (_chatId: string, title: string, content: string) => {
+      notices.push({ title, content });
+    };
+    const { entered, release } = deferFirstSendCard(sender);
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    bridge.runOneTurn = vi.fn();
+
+    const first = bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: 'first',
+    });
+    await entered;
+
+    await bridge.handleMessage({
+      messageId: 'm-reset',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '/reset',
+    });
+    release();
+    await first;
+
+    expect(notices.at(-1)?.title).toContain('Session Reset');
+    expect(bridge.runOneTurn).not.toHaveBeenCalled();
+    expect(sender.updated.at(-1)?.state).toMatchObject({
+      status: 'error',
+      errorMessage: 'Task was cancelled',
+    });
+    expect(bridge.getSessionManager().getSession('chat-1').sessionId).toBeUndefined();
+    expect(bridge.isBusy('chat-1')).toBe(false);
+    bridge.destroy();
+  });
+
+  it('does not let an old API task cleanup delete a newer task owner', async () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const releases: Array<() => void> = [];
+    bridge.runOneTurn = vi.fn(async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      releases.push(release);
+      return {
+        stream: (async function* () {
+          await gate;
+          yield { type: 'result', subtype: 'success', result: 'done' };
+        })(),
+        finish: vi.fn(),
+        resolveQuestion: vi.fn(),
+      };
+    });
+
+    const first = bridge.executeApiTask({ prompt: 'first', chatId: 'chat-1' });
+    await vi.waitFor(() => expect(bridge.runOneTurn).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(bridge.runningTasks.has('chat-1')).toBe(true));
+    expect(bridge.stopChatTask('chat-1')).toBe(true);
+
+    const second = bridge.executeApiTask({ prompt: 'second', chatId: 'chat-1' });
+    await vi.waitFor(() => expect(bridge.runOneTurn).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(bridge.runningTasks.has('chat-1')).toBe(true));
+
+    releases[0]();
+    await first;
+    expect(bridge.isBusy('chat-1')).toBe(true);
+
+    releases[1]();
+    await second;
+    expect(bridge.isBusy('chat-1')).toBe(false);
+    bridge.destroy();
   });
 
   it('advances multi-question cards and resolves only after the last answer', async () => {

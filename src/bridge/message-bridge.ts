@@ -121,6 +121,12 @@ interface RunningTask {
   teamState?: TeamState;
 }
 
+interface StartingTask {
+  startTime: number;
+  abortController: AbortController;
+  cancelled: boolean;
+}
+
 export interface ApiTaskOptions {
   prompt: string;
   chatId: string;
@@ -182,6 +188,8 @@ export class MessageBridge {
   private outputHandler: OutputHandler;
   readonly costTracker: CostTracker;
   private sessionRegistry?: SessionRegistry;
+  /** Chats that have begun task setup but do not have an ExecutionHandle yet. */
+  private startingTasks = new Map<string, StartingTask>();
   private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
   private messageQueues = new Map<string, IncomingMessage[]>(); // per-chatId message queue
   private pendingBatches = new Map<string, PendingBatch>(); // media debounce batches
@@ -282,7 +290,7 @@ export class MessageBridge {
 
     this.commandHandler = new CommandHandler(
       config, logger, sender, this.sessionManager, memoryClient, this.audit,
-      (chatId) => this.runningTasks.get(chatId),
+      (chatId) => this.startingTasks.get(chatId) ?? this.runningTasks.get(chatId),
       (chatId) => this.stopTask(chatId),
       (chatId) => this.clearChatQueue(chatId),
       (chatId, reason) => this.releaseChatExecutor(chatId, reason),
@@ -300,8 +308,8 @@ export class MessageBridge {
       outputHandler: this.outputHandler,
       audit: this.audit,
       runOneTurn: this.runOneTurn.bind(this),
-      executeQuery: this.executeQuery.bind(this),
-      hasRunningTask: (chatId) => this.runningTasks.has(chatId),
+      executeQuery: this.startQuery.bind(this),
+      hasRunningTask: (chatId) => this.isChatBusy(chatId),
       hasQueuedMessages: (chatId) => this.messageQueues.has(chatId),
     });
     this.slashPickers = new SlashPickerController({
@@ -314,7 +322,7 @@ export class MessageBridge {
       applyResume: this.applyResume.bind(this),
       finalizeQuestionCard: this.finalizeBetweenTurnQuestionCard.bind(this),
       handleMessage: this.handleMessage.bind(this),
-      isBusy: (chatId) => this.runningTasks.has(chatId) || this.continuationTasks.has(chatId),
+      isBusy: (chatId) => this.isChatBusy(chatId) || this.continuationTasks.has(chatId),
       prepareSessionForExecution: this.prepareSessionForExecution.bind(this),
       runOneTurn: this.runOneTurn.bind(this),
     });
@@ -462,7 +470,43 @@ export class MessageBridge {
   }
 
   isBusy(chatId: string): boolean {
-    return this.runningTasks.has(chatId);
+    return this.isChatBusy(chatId);
+  }
+
+  private isChatBusy(chatId: string): boolean {
+    return this.startingTasks.has(chatId) || this.runningTasks.has(chatId);
+  }
+
+  private reserveTaskStart(chatId: string): StartingTask | undefined {
+    if (this.isChatBusy(chatId)) return undefined;
+    const task: StartingTask = {
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      cancelled: false,
+    };
+    this.startingTasks.set(chatId, task);
+    return task;
+  }
+
+  private releaseTaskStart(chatId: string, task: StartingTask): boolean {
+    if (this.startingTasks.get(chatId) !== task) return false;
+    this.startingTasks.delete(chatId);
+    return true;
+  }
+
+  private isTaskStartActive(chatId: string, task: StartingTask): boolean {
+    return !task.cancelled && this.startingTasks.get(chatId) === task;
+  }
+
+  private cancelTaskStart(chatId: string): boolean {
+    const task = this.startingTasks.get(chatId);
+    if (!task) return false;
+    task.cancelled = true;
+    task.abortController.abort();
+    if (this.startingTasks.get(chatId) === task) {
+      this.startingTasks.delete(chatId);
+    }
+    return true;
   }
 
   /** Return info about all currently running tasks (for team status display). */
@@ -475,7 +519,7 @@ export class MessageBridge {
 
   /** Stop a running task for the given chatId. Returns true if a task was stopped. */
   stopChatTask(chatId: string): boolean {
-    if (!this.runningTasks.has(chatId)) return false;
+    if (!this.isChatBusy(chatId)) return false;
     this.stopTask(chatId);
     return true;
   }
@@ -499,6 +543,7 @@ export class MessageBridge {
   }
 
   private stopTask(chatId: string): void {
+    if (this.cancelTaskStart(chatId)) return;
     const task = this.runningTasks.get(chatId);
     if (!task) return;
     if (task.questionTimeoutId) clearTimeout(task.questionTimeoutId);
@@ -1023,7 +1068,7 @@ export class MessageBridge {
 
     // If a user turn just started, drop the spontaneous batch — its content
     // is about to land in the live card anyway.
-    if (this.runningTasks.has(chatId)) {
+    if (this.isChatBusy(chatId)) {
       this.logger.debug({ chatId, snippetCount: buf.snippets.length }, 'MessageBridge: drop spontaneous (active turn)');
       return;
     }
@@ -1495,7 +1540,7 @@ export class MessageBridge {
     if (queue.length === 0) {
       this.messageQueues.delete(chatId);
     }
-    this.executeQuery(next).catch((err) => {
+    this.startQuery(next).catch((err) => {
       this.logger.error({ err, chatId }, 'Error processing queued message');
     });
   }
@@ -1575,7 +1620,7 @@ export class MessageBridge {
       this.codexCommands.mirrorGoalCommand(chatId, text);
 
       // Unrecognized /xxx command — pass through to Claude
-      if (this.runningTasks.has(chatId)) {
+      if (this.isChatBusy(chatId)) {
         await this.sender.sendTextNotice(
           chatId,
           '⏳ Task In Progress',
@@ -1584,7 +1629,7 @@ export class MessageBridge {
         );
         return;
       }
-      await this.executeQuery(msg);
+      await this.startQuery(msg);
       return;
     }
 
@@ -1615,7 +1660,7 @@ export class MessageBridge {
     }
 
     // If a task is running, queue the message instead of rejecting
-    if (this.runningTasks.has(chatId)) {
+    if (this.isChatBusy(chatId)) {
       // If there's a pending batch and this is a text message, merge batch into the queued text
       const batch = this.pendingBatches.get(chatId);
       if (batch && !isDefaultMediaText(msg)) {
@@ -1677,12 +1722,12 @@ export class MessageBridge {
       this.pendingBatches.delete(chatId);
       const merged = mergeBatchWithText(batch.messages, msg);
       this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch with text message');
-      await this.executeQuery(merged);
+      await this.startQuery(merged);
       return;
     }
 
     // Plain text, no batch: execute immediately (original behavior)
-    await this.executeQuery(msg);
+    await this.startQuery(msg);
   }
 
   private async handleAnswer(msg: IncomingMessage, task: RunningTask): Promise<void> {
@@ -1894,7 +1939,7 @@ export class MessageBridge {
     this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch (timeout)');
 
     // If a task started running during the debounce window, queue instead
-    if (this.runningTasks.has(chatId)) {
+    if (this.isChatBusy(chatId)) {
       const queue = this.messageQueues.get(chatId) || [];
       if (queue.length < MAX_QUEUE_SIZE) {
         queue.push(merged);
@@ -1905,16 +1950,66 @@ export class MessageBridge {
       return;
     }
 
-    this.executeQuery(merged).catch(err => {
+    this.startQuery(merged).catch(err => {
       this.logger.error({ err, chatId }, 'Error executing batched messages');
     });
   }
 
-  private async executeQuery(msg: IncomingMessage): Promise<void> {
+  private async startQuery(msg: IncomingMessage): Promise<void> {
+    const startingTask = this.reserveTaskStart(msg.chatId);
+    if (!startingTask) {
+      throw new Error(`Chat ${msg.chatId} is busy with another task`);
+    }
+    try {
+      await this.executeQuery(msg, startingTask);
+    } finally {
+      if (this.releaseTaskStart(msg.chatId, startingTask)) {
+        this.processQueue(msg.chatId);
+      }
+    }
+  }
+
+  private async finalizeCancelledStart(messageId: string, userPrompt: string): Promise<void> {
+    try {
+      await this.sender.updateCard(messageId, {
+        status: 'error',
+        userPrompt,
+        responseText: '_Task cancelled before execution started_',
+        toolCalls: [],
+        errorMessage: 'Task was cancelled',
+      });
+    } catch (err) {
+      this.logger.warn({ err, messageId }, 'Failed to finalize cancelled task card');
+    }
+  }
+
+  private cleanupTaskSetup(
+    chatId: string,
+    imagePath: string | undefined,
+    filePath: string | undefined,
+    extraPaths: string[],
+    outputsDir?: string,
+    preserveForNewOwner = false,
+  ): void {
+    if (imagePath) {
+      try { fs.unlinkSync(imagePath); } catch { /* ignore */ }
+    }
+    if (filePath) {
+      try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+    }
+    for (const p of extraPaths) {
+      try { fs.unlinkSync(p); } catch { /* ignore */ }
+    }
+    if (outputsDir && (!preserveForNewOwner || !this.isChatBusy(chatId))) {
+      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+    }
+  }
+
+  private async executeQuery(msg: IncomingMessage, startingTask: StartingTask): Promise<void> {
     const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId } = msg;
     const { session, engineName } = this.prepareSessionForExecution(chatId);
     const cwd = session.workingDirectory;
-    const abortController = new AbortController();
+    const abortController = startingTask.abortController;
     const activeEngine = session.engine ?? resolveEngineName(this.config);
     const enginePromptText = normalizePromptForEngine(text, activeEngine);
 
@@ -1973,6 +2068,11 @@ export class MessageBridge {
       }
     }
 
+    if (!this.isTaskStartActive(chatId, startingTask)) {
+      this.cleanupTaskSetup(chatId, imagePath, filePath, extraPaths);
+      return;
+    }
+
     // Prepare per-chat outputs directory
     const outputsDir = this.outputsManager.prepareDir(chatId);
 
@@ -1999,6 +2099,13 @@ export class MessageBridge {
 
     if (!messageId) {
       this.logger.error('Failed to send initial card, aborting');
+      this.cleanupTaskSetup(chatId, imagePath, filePath, extraPaths, outputsDir);
+      return;
+    }
+
+    if (!this.isTaskStartActive(chatId, startingTask)) {
+      await this.finalizeCancelledStart(messageId, displayPrompt);
+      this.cleanupTaskSetup(chatId, imagePath, filePath, extraPaths, outputsDir, true);
       return;
     }
 
@@ -2065,15 +2172,33 @@ export class MessageBridge {
     // All turn-starting paths (initial + retry) route through runOneTurn so
     // persistent mode is enforced consistently and stale-session retries
     // properly release the bound executor before reacquiring.
-    const executionHandle = await this.runOneTurn(chatId, engineName, {
-      prompt,
-      cwd,
-      abortController,
-      outputsDir,
-      apiContext: buildApiContext(),
-      model: session.model,
-      onTeamEvent,
-    });
+    let executionHandle: ExecutionHandle;
+    try {
+      executionHandle = await this.runOneTurn(chatId, engineName, {
+        prompt,
+        cwd,
+        abortController,
+        outputsDir,
+        apiContext: buildApiContext(),
+        model: session.model,
+        onTeamEvent,
+      });
+    } catch (err) {
+      if (!this.isTaskStartActive(chatId, startingTask)) {
+        await this.finalizeCancelledStart(messageId, displayPrompt);
+        this.cleanupTaskSetup(chatId, imagePath, filePath, extraPaths, outputsDir, true);
+        return;
+      }
+      this.cleanupTaskSetup(chatId, imagePath, filePath, extraPaths, outputsDir);
+      throw err;
+    }
+
+    if (!this.isTaskStartActive(chatId, startingTask)) {
+      try { executionHandle.finish(); } catch { /* ignore */ }
+      await this.finalizeCancelledStart(messageId, displayPrompt);
+      this.cleanupTaskSetup(chatId, imagePath, filePath, extraPaths, outputsDir, true);
+      return;
+    }
 
     // Register running task
     const startTime = Date.now();
@@ -2089,6 +2214,7 @@ export class MessageBridge {
       rateLimiter,
       chatId,
     };
+    this.releaseTaskStart(chatId, startingTask);
     this.runningTasks.set(chatId, runningTask);
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
 
@@ -2501,34 +2627,67 @@ export class MessageBridge {
       }
       try { executionHandle.finish(); } catch (e) { this.logger.warn({ err: e, chatId }, 'Error finishing execution handle'); }
       // Only delete if this is still our task (guards against stopTask race condition)
-      if (this.runningTasks.get(chatId) === runningTask) {
+      const ownsChat = this.runningTasks.get(chatId) === runningTask;
+      if (ownsChat) {
         this.runningTasks.delete(chatId);
         metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
         this.processQueue(chatId);
       }
-      if (imagePath) {
-        try { fs.unlinkSync(imagePath); } catch { /* ignore */ }
-      }
-      if (filePath) {
-        try { fs.unlinkSync(filePath); } catch { /* ignore */ }
-      }
-      for (const p of extraPaths) {
-        try { fs.unlinkSync(p); } catch { /* ignore */ }
-      }
-      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+      this.cleanupTaskSetup(chatId, imagePath, filePath, extraPaths, outputsDir, !ownsChat);
     }
   }
 
   async executeApiTask(options: ApiTaskOptions): Promise<ApiTaskResult> {
-    const { prompt, chatId, userId = 'api', sendCards = false } = options;
-
-    if (this.runningTasks.has(chatId)) {
+    const { chatId } = options;
+    const startingTask = this.reserveTaskStart(chatId);
+    if (!startingTask) {
       return { success: false, responseText: '', error: 'Chat is busy with another task' };
     }
+    try {
+      return await this.executeReservedApiTask(options, startingTask);
+    } finally {
+      if (this.releaseTaskStart(chatId, startingTask)) {
+        this.processQueue(chatId);
+      }
+    }
+  }
+
+  private async finalizeCancelledApiStart(
+    options: ApiTaskOptions,
+    messageId: string | undefined,
+    effectiveMessageId: string,
+    outputsDir: string,
+  ): Promise<ApiTaskResult> {
+    const state: CardState = {
+      status: 'error',
+      userPrompt: options.prompt,
+      responseText: '',
+      toolCalls: [],
+      errorMessage: 'Task was cancelled before execution started',
+    };
+    if (options.sendCards && messageId) {
+      try {
+        await this.sender.updateCard(messageId, state);
+      } catch (err) {
+        this.logger.warn({ err, messageId }, 'Failed to finalize cancelled API task card');
+      }
+    }
+    options.onUpdate?.(state, effectiveMessageId, true);
+    if (!this.isChatBusy(options.chatId)) {
+      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+    }
+    return { success: false, responseText: '', error: state.errorMessage };
+  }
+
+  private async executeReservedApiTask(
+    options: ApiTaskOptions,
+    startingTask: StartingTask,
+  ): Promise<ApiTaskResult> {
+    const { prompt, chatId, userId = 'api', sendCards = false } = options;
 
     const { session, engineName } = this.prepareSessionForApiExecution(chatId, options.engine);
     const cwd = session.workingDirectory;
-    const abortController = new AbortController();
+    const abortController = startingTask.abortController;
 
     const outputsDir = this.outputsManager.prepareDir(chatId);
 
@@ -2553,6 +2712,10 @@ export class MessageBridge {
     // Generate a messageId for onUpdate even if sendCards is false
     const effectiveMessageId = messageId || `api-${chatId}-${Date.now()}`;
     options.onUpdate?.(initialState, effectiveMessageId, false);
+
+    if (!this.isTaskStartActive(chatId, startingTask)) {
+      return this.finalizeCancelledApiStart(options, messageId, effectiveMessageId, outputsDir);
+    }
 
     const buildApiContext = (): ApiContext => ({
       botName: this.config.name,
@@ -2594,17 +2757,31 @@ export class MessageBridge {
     // options; persistent executor would need additional plumbing to apply
     // them per-turn — runOneTurn falls back to legacy spawn automatically
     // when those are set.
-    const executionHandle = await this.runOneTurn(chatId, engineName, {
-      prompt,
-      cwd,
-      abortController,
-      outputsDir,
-      apiContext: buildApiContext(),
-      maxTurns: options.maxTurns,
-      model: options.model ?? session.model,
-      allowedTools: options.allowedTools,
-      onTeamEvent,
-    });
+    let executionHandle: ExecutionHandle;
+    try {
+      executionHandle = await this.runOneTurn(chatId, engineName, {
+        prompt,
+        cwd,
+        abortController,
+        outputsDir,
+        apiContext: buildApiContext(),
+        maxTurns: options.maxTurns,
+        model: options.model ?? session.model,
+        allowedTools: options.allowedTools,
+        onTeamEvent,
+      });
+    } catch (err) {
+      if (!this.isTaskStartActive(chatId, startingTask)) {
+        return this.finalizeCancelledApiStart(options, messageId, effectiveMessageId, outputsDir);
+      }
+      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+      throw err;
+    }
+
+    if (!this.isTaskStartActive(chatId, startingTask)) {
+      try { executionHandle.finish(); } catch { /* ignore */ }
+      return this.finalizeCancelledApiStart(options, messageId, effectiveMessageId, outputsDir);
+    }
 
     const startTime = Date.now();
     runningTask = {
@@ -2619,6 +2796,7 @@ export class MessageBridge {
       rateLimiter,
       chatId,
     };
+    this.releaseTaskStart(chatId, startingTask);
     this.runningTasks.set(chatId, runningTask);
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
 
@@ -2909,10 +3087,15 @@ export class MessageBridge {
       clearTimeout(timeoutId);
       if (idleTimerId) clearTimeout(idleTimerId);
       try { executionHandle.finish(); } catch (e) { this.logger.warn({ err: e, chatId }, 'Error finishing execution handle'); }
-      this.runningTasks.delete(chatId);
-      metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
-      this.processQueue(chatId);
-      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+      const ownsChat = this.runningTasks.get(chatId) === runningTask;
+      if (ownsChat) {
+        this.runningTasks.delete(chatId);
+        metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
+        this.processQueue(chatId);
+      }
+      if (ownsChat || !this.isChatBusy(chatId)) {
+        try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+      }
     }
   }
 
@@ -3011,6 +3194,7 @@ export class MessageBridge {
     this.pendingBetweenTurnQuestions.clear();
     this.recentQuestionCard.clear();
     this.exitPlanCardsShown.clear();
+    this.startingTasks.clear();
     this.messageQueues.clear();
     this.sessionManager.destroy();
     // Tear down persistent executors (Stage 2). This is the one inherently
