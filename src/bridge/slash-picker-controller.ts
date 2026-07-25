@@ -121,6 +121,16 @@ export class SlashPickerController {
     this.pending.delete(chatId);
 
     if (pending.command === '/resume') {
+      if (this.deps.isBusy(chatId)) {
+        await this.deps.finalizeQuestionCard(pending.cardMessageId, {
+          status: 'error',
+          userPrompt: '/resume',
+          responseText: 'Resume cancelled because a task is in progress. Use `/stop` first, then send `/resume` again.',
+          toolCalls: [],
+          errorMessage: 'Task in progress',
+        });
+        return true;
+      }
       await this.deps.applyResume(chatId, choice);
       await this.deps.finalizeQuestionCard(pending.cardMessageId, {
         status: 'complete',
@@ -201,7 +211,26 @@ export class SlashPickerController {
       return true;
     }
 
+    if (this.deps.isBusy(chatId)) {
+      await this.deps.sender.sendTextNotice(
+        chatId,
+        '⏳ Task In Progress',
+        'A task is running. Use `/stop` first, then `/resume`.',
+        'orange',
+      );
+      return true;
+    }
+
     const sessions = await this.deps.listSessionsForChat(chatId);
+    if (this.deps.isBusy(chatId)) {
+      await this.deps.sender.sendTextNotice(
+        chatId,
+        '⏳ Task In Progress',
+        'A task started while sessions were loading. Use `/stop` first, then `/resume`.',
+        'orange',
+      );
+      return true;
+    }
     if (sessions.length === 0) {
       await this.deps.sender.sendTextNotice(
         chatId,
