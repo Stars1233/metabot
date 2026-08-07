@@ -16,5 +16,6 @@ export { handleRtcRoutes } from './rtc-routes.js';
 export { handleSessionRoutes } from './session-routes.js';
 export { handleExecutorRoutes } from './executor-routes.js';
 export { handleAgentTeamRoutes } from './agent-team-routes.js';
+export { handleRestartRoutes } from './restart-routes.js';
 export { jsonResponse, readBody, parseJsonBody } from './helpers.js';
 export type { RouteContext, RouteHandler } from './types.js';

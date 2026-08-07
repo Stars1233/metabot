@@ -1,5 +1,6 @@
 import * as https from 'node:https';
 import * as path from 'node:path';
+import { once } from 'node:events';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { loadAppConfig, type BotConfig } from './config.js';
 import { createLogger, type Logger } from './utils/logger.js';
@@ -10,6 +11,7 @@ import { FeishuSenderAdapter } from './feishu/feishu-sender-adapter.js';
 import { resolveFeishuWsRecoveryOptions } from './feishu/ws-recovery.js';
 import { MessageBridge } from './bridge/message-bridge.js';
 import { loadRestartBreadcrumb } from './bridge/restart-notice.js';
+import { recoverControlledRestartAfterStartup } from './bridge/restart-coordinator.js';
 import type { IMessageSender } from './bridge/message-sender.interface.js';
 import type { BotConfigBase } from './config.js';
 import { startTelegramBot } from './telegram/telegram-bot.js';
@@ -402,6 +404,12 @@ async function main() {
     sessionRegistry,
     agentTeams: appConfig.agentTeams,
   });
+
+  // Restart recovery must run in the new process, after every bot sender and
+  // the local health endpoint are ready. It resumes every affected chat, not
+  // only the chat that submitted the restart command.
+  if (!apiServer.listening) await once(apiServer, 'listening');
+  await recoverControlledRestartAfterStartup({ registry, scheduler, logger });
 
   // Graceful shutdown
   const shutdown = async () => {

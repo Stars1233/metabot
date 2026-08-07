@@ -76,6 +76,18 @@ required:
 
 Do not reuse the Core token as the Bridge secret.
 
+## Restart safety
+
+Use `metabot restart` instead of calling `pm2 restart metabot` directly. The
+CLI coordinates the process-wide restart with every active bot chat, persists
+the handoff, and resumes interrupted user-facing turns after the new Bridge is
+listening. Direct PM2 commands bypass that contract and can interrupt all bots
+without preparation or completion cards.
+
+The first update that introduces this protocol may see a 404 from the still-old
+Bridge. `metabot update` permits that one compatibility handoff; subsequent
+updates require coordinated preparation. No database migration is involved.
+
 ## Update and rollback
 
 ```bash
@@ -88,6 +100,10 @@ Package overlays preserve `.env`, `bots.json`, `data/`, `logs/`, and user/Core
 state under `~/.metabot/` and `~/.metabot-core/`. If a new release fails your
 smoke checks, reinstall the previously known version explicitly instead of
 editing installed package files.
+
+Rollback does not require changing `sessions.db`. Reinstall the previous
+release and remove a stale `~/.metabot/controlled-restart.json` only after
+confirming no restart is in progress; older releases ignore that file.
 
 ## Source deployments
 

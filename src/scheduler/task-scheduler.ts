@@ -21,6 +21,8 @@ export interface ScheduledTask {
   status: 'pending' | 'executing' | 'completed' | 'failed' | 'cancelled';
   createdAt: number;
   retryCount: number;
+  /** Stable idempotency key for system-created tasks such as restart recovery. */
+  dedupeKey?: string;
   parentRecurringId?: string;  // set if spawned by a recurring task
 }
 
@@ -31,6 +33,7 @@ export interface ScheduleInput {
   delaySeconds: number;
   sendCards?: boolean;
   label?: string;
+  dedupeKey?: string;
 }
 
 export interface ScheduleUpdateInput {
@@ -126,6 +129,18 @@ export class TaskScheduler {
   // ===== One-time task methods (unchanged) =====
 
   scheduleTask(input: ScheduleInput): ScheduledTask {
+    if (input.dedupeKey) {
+      const existing = Array.from(this.tasks.values()).find(
+        (task) => task.dedupeKey === input.dedupeKey && task.status !== 'cancelled',
+      );
+      if (existing) {
+        this.logger.info(
+          { taskId: existing.id, dedupeKey: input.dedupeKey, status: existing.status },
+          'Scheduled task deduplicated',
+        );
+        return existing;
+      }
+    }
     const now = Date.now();
     const task: ScheduledTask = {
       id: crypto.randomUUID(),
@@ -135,6 +150,7 @@ export class TaskScheduler {
       executeAt: now + input.delaySeconds * 1000,
       sendCards: input.sendCards ?? true,
       label: input.label,
+      dedupeKey: input.dedupeKey,
       status: 'pending',
       createdAt: now,
       retryCount: 0,
