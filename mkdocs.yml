@@ -1,6 +1,6 @@
 site_name: MetaBot
 site_url: https://xvirobotics.com/metabot
-site_description: MetaBot Personal Edition — a self-hosted Core Console for Codex, Kimi Code and Claude Code, reachable from Web, Feishu/Lark, Telegram and WeChat.
+site_description: MetaBot Personal Edition — a self-hosted Core Console for Codex, Kimi Code and Claude Code, reachable from Web, Feishu/Lark, Telegram, Slack and WeChat.
 repo_url: https://github.com/xvirobotics/metabot
 repo_name: xvirobotics/metabot
 edit_uri: edit/main/docs/
@@ -69,27 +69,28 @@ plugins:
           nav:
             - 首页: index.md
             - 快速开始:
-              - 安装: getting-started/installation.md
-              - 快速配置: getting-started/quick-setup.md
-              - 飞书应用配置: getting-started/feishu-app-setup.md
+                - 安装: getting-started/installation.md
+                - 快速配置: getting-started/quick-setup.md
+                - 飞书应用配置: getting-started/feishu-app-setup.md
             - 产品:
-              - Core Console: features/web-ui.md
-              - 多 Bot 与引擎: configuration/multi-bot.md
-              - MetaMemory: features/metamemory.md
-              - MetaSkill: features/metaskill.md
-              - Agent 团队: features/agent-teams.md
-              - 微信接入: features/wechat.md
+                - Core Console: features/web-ui.md
+                - 多 Bot 与引擎: configuration/multi-bot.md
+                - MetaMemory: features/metamemory.md
+                - MetaSkill: features/metaskill.md
+                - Agent 团队: features/agent-teams.md
+                - Slack: features/slack.md
+                - 微信接入: features/wechat.md
             - 参考:
-              - 聊天命令: usage/chat-commands.md
-              - metabot CLI: reference/cli-metabot.md
-              - REST API: reference/api.md
-              - 环境变量: configuration/environment-variables.md
-              - 故障排除: troubleshooting.md
+                - 聊天命令: usage/chat-commands.md
+                - metabot CLI: reference/cli-metabot.md
+                - REST API: reference/api.md
+                - 环境变量: configuration/environment-variables.md
+                - 故障排除: troubleshooting.md
             - 运维与开发:
-              - 架构: concepts/architecture.md
-              - 安全: concepts/security.md
-              - 生产部署: deployment/production.md
-              - 贡献指南: development/contributing.md
+                - 架构: concepts/architecture.md
+                - 安全: concepts/security.md
+                - 生产部署: deployment/production.md
+                - 贡献指南: development/contributing.md
 
 extra:
   social:
@@ -106,24 +107,25 @@ extra:
 nav:
   - Home: index.md
   - Getting Started:
-    - Installation: getting-started/installation.md
-    - Quick Setup: getting-started/quick-setup.md
-    - Feishu App Setup: getting-started/feishu-app-setup.md
+      - Installation: getting-started/installation.md
+      - Quick Setup: getting-started/quick-setup.md
+      - Feishu App Setup: getting-started/feishu-app-setup.md
   - Product:
-    - Core Console: features/web-ui.md
-    - Multi-Bot and Engines: configuration/multi-bot.md
-    - MetaMemory: features/metamemory.md
-    - MetaSkill: features/metaskill.md
-    - Agent Teams: features/agent-teams.md
-    - WeChat: features/wechat.md
+      - Core Console: features/web-ui.md
+      - Multi-Bot and Engines: configuration/multi-bot.md
+      - MetaMemory: features/metamemory.md
+      - MetaSkill: features/metaskill.md
+      - Agent Teams: features/agent-teams.md
+      - Slack: features/slack.md
+      - WeChat: features/wechat.md
   - Reference:
-    - Chat Commands: usage/chat-commands.md
-    - metabot CLI: reference/cli-metabot.md
-    - REST API: reference/api.md
-    - Environment Variables: configuration/environment-variables.md
-    - Troubleshooting: troubleshooting.md
+      - Chat Commands: usage/chat-commands.md
+      - metabot CLI: reference/cli-metabot.md
+      - REST API: reference/api.md
+      - Environment Variables: configuration/environment-variables.md
+      - Troubleshooting: troubleshooting.md
   - Operations and Development:
-    - Architecture: concepts/architecture.md
-    - Security: concepts/security.md
-    - Production: deployment/production.md
-    - Contributing: development/contributing.md
+      - Architecture: concepts/architecture.md
+      - Security: concepts/security.md
+      - Production: deployment/production.md
+      - Contributing: development/contributing.md

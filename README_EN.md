@@ -94,7 +94,7 @@ Prerequisites: **Node.js >= 22.19**, Git, and credentials for at least one engin
 
 1. Run the one-line installer above.
 2. Choose Codex or Kimi Code and complete its login in a separate terminal.
-3. Connect Feishu/Lark, Telegram, or WeChat when prompted.
+3. Connect Feishu/Lark, Telegram, or WeChat when prompted; for Slack, follow the [Slack Guide](docs/features/slack.md) to configure Events API.
 4. Verify the services and open the local console:
 
 ```bash

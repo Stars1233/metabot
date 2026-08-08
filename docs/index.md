@@ -1,6 +1,6 @@
 ---
 title: MetaBot — Self-hosted Core Console for Codex and Kimi Code
-description: Run Codex and Kimi Code from one self-hosted Core Console, the Web, Feishu/Lark, Telegram, and WeChat.
+description: Run Codex and Kimi Code from one self-hosted Core Console, the Web, Feishu/Lark, Telegram, Slack, and WeChat.
 template: home.html
 hide:
   - navigation
@@ -11,7 +11,7 @@ hide:
   <div class="mb-container mb-hero-inner">
     <div class="mb-badge mb-reveal"><span class="mb-badge-dot" aria-hidden="true"></span> Open source · MIT · Self-hosted</div>
     <h1 class="mb-hero-title mb-reveal" id="mb-hero-title">One console for your <em>agent fleet.</em></h1>
-    <p class="mb-hero-sub mb-reveal">MetaBot Personal Edition runs <strong>Codex by default</strong> and <strong>Kimi Code 0.27+</strong> as a first-class engine — from the Web, Feishu/Lark, Telegram, and WeChat. Claude Code stays compatible; your logins stay on your machine.</p>
+    <p class="mb-hero-sub mb-reveal">MetaBot Personal Edition runs <strong>Codex by default</strong> and <strong>Kimi Code 0.27+</strong> as a first-class engine — from the Web, Feishu/Lark, Telegram, Slack, and WeChat. Claude Code stays compatible; your logins stay on your machine.</p>
     <div class="mb-hero-ctas mb-reveal">
       <a class="mb-btn mb-btn-primary" href="getting-started/installation/">Install MetaBot <span class="mb-btn-arrow" aria-hidden="true">→</span></a>
       <a class="mb-btn" href="https://github.com/xvirobotics/metabot">View on GitHub <span class="mb-btn-arrow" aria-hidden="true">↗</span></a>

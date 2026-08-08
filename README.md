@@ -93,7 +93,7 @@ kimi login
 
 1. 执行上面的一行安装命令。
 2. 选择 Codex 或 Kimi Code，并在独立终端完成登录。
-3. 按引导连接飞书/Lark、Telegram 或微信。
+3. 按引导连接飞书/Lark、Telegram 或微信；如需 Slack，按 [Slack 指南](docs/features/slack.zh.md) 配置 Events API。
 4. 验证服务并打开本地控制台：
 
 ```bash
