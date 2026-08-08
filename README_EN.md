@@ -19,6 +19,14 @@ _A self-hosted personal agent workspace. Claude Code remains available for compa
 </div>
 
 <div align="center">
+<img src="resources/web-ui.png" alt="MetaBot Core Console Chat" />
+<br>
+<sub>Core Console · Chat · Codex / Kimi Code · tools · files · user confirmation</sub>
+</div>
+
+<br>
+
+<div align="center">
 <table>
 <tr>
   <td width="25%"><img src="resources/demo-1.png" alt="Spawn an agent team" /></td>

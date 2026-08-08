@@ -19,6 +19,14 @@ _可自托管的个人 Agent 工作台；Claude Code 作为兼容引擎继续保
 </div>
 
 <div align="center">
+<img src="resources/web-ui.png" alt="MetaBot Core Console Chat" />
+<br>
+<sub>Core Console · Chat · Codex / Kimi Code · 工具 · 文件 · 用户确认</sub>
+</div>
+
+<br>
+
+<div align="center">
 <table>
 <tr>
   <td width="25%"><img src="resources/demo-1.png" alt="召唤 Agent 团队" /></td>
