@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { Home } from './routes/home';
 import { MemoryPath } from './routes/memory-path';
@@ -17,10 +17,12 @@ import { AUTH_REQUIRED_EVENT, clearApiToken, getApiToken } from './lib/auth';
 
 function Brand() {
   return (
-    <div className="brand">
-      <span className="glyph" />
-      <span className="name">metabot</span>
-      <span className="tag">personal console</span>
+    <div className="brand" aria-label="MetaBot Personal Console">
+      <span className="glyph" aria-hidden />
+      <span className="brand-copy">
+        <span className="name">MetaBot</span>
+        <span className="tag">Personal Console</span>
+      </span>
     </div>
   );
 }
@@ -29,6 +31,34 @@ const SIDEBAR_STATE_KEY = 'metabot-core:sidebar-collapsed';
 const THEME_STATE_KEY = 'metabot-core:theme';
 
 type Theme = 'dark' | 'light';
+type NavItem = {
+  to: string;
+  label: string;
+  icon: string;
+  end?: boolean;
+  desc: string;
+};
+
+const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
+  {
+    label: 'Workspace',
+    items: [
+      { to: '/', label: 'Overview', icon: '⌘', end: true, desc: 'Recent memory and activity' },
+      { to: '/chat', label: 'Chat', icon: '●', desc: 'Codex, Kimi Code and Claude turns' },
+      { to: '/t5t', label: 'T5T', icon: '▦', desc: 'Goals, WIP and project status' },
+      { to: '/memory', label: 'Memory', icon: '▤', desc: 'Documents and folders' },
+    ],
+  },
+  {
+    label: 'Manage',
+    items: [
+      { to: '/skills', label: 'Skills', icon: '✦', desc: 'Reusable agent capabilities' },
+      { to: '/agents', label: 'Agents', icon: '◉', desc: 'Registered bots' },
+      { to: '/users', label: 'Users', icon: '◎', desc: 'Personal memory owners' },
+      { to: '/cli', label: 'CLI Access', icon: '›_', desc: 'Local token and commands' },
+    ],
+  },
+];
 
 function readSidebarCollapsed(): boolean {
   try {
@@ -76,7 +106,7 @@ function ThemeToggle({ theme, onToggle }: { theme: Theme; onToggle: () => void }
   );
 }
 
-function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+function SidebarToggle({ collapsed, onToggle, label }: { collapsed: boolean; onToggle: () => void; label?: string }) {
   return (
     <button
       type="button"
@@ -86,12 +116,13 @@ function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: 
       aria-label={collapsed ? 'show sidebar' : 'hide sidebar'}
       aria-pressed={collapsed}
     >
-      {collapsed ? '›' : '‹'}
+      <span aria-hidden>{collapsed ? '☰' : '‹'}</span>
+      {label ? <span>{label}</span> : null}
     </button>
   );
 }
 
-function SearchBar() {
+function SearchBar({ compact = false }: { compact?: boolean }) {
   const nav = useNavigate();
   const loc = useLocation();
   const initial = new URLSearchParams(loc.search).get('q') || '';
@@ -103,7 +134,7 @@ function SearchBar() {
 
   return (
     <form
-      className="search-bar"
+      className={compact ? 'search-bar search-bar-compact' : 'search-bar'}
       onSubmit={(e) => {
         e.preventDefault();
         const trimmed = q.trim();
@@ -116,7 +147,7 @@ function SearchBar() {
         type="text"
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        placeholder="search memory + skills…  ( / to focus )"
+        placeholder="search memory + skills…  ( / )"
         spellCheck={false}
         autoComplete="off"
       />
@@ -124,9 +155,40 @@ function SearchBar() {
   );
 }
 
+function NavEntry({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
+  return (
+    <NavLink
+      to={item.to}
+      end={item.end}
+      className={({ isActive }) => `app-nav-item${isActive ? ' active' : ''}`}
+      aria-label={collapsed ? `${item.label}: ${item.desc}` : undefined}
+      title={collapsed ? item.label : item.desc}
+    >
+      <span className="app-nav-icon" aria-hidden>
+        {item.icon}
+      </span>
+      <span className="app-nav-copy">
+        <span className="app-nav-label">{item.label}</span>
+        <span className="app-nav-desc">{item.desc}</span>
+      </span>
+    </NavLink>
+  );
+}
+
 function Shell({ children, onSignOut }: { children: React.ReactNode; onSignOut: () => void }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(readSidebarCollapsed);
   const [theme, setTheme] = useState<Theme>(readTheme);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const loc = useLocation();
+  const currentSection = useMemo(() => {
+    for (const group of NAV_GROUPS) {
+      const match = group.items.find((item) =>
+        item.end ? loc.pathname === item.to : loc.pathname === item.to || loc.pathname.startsWith(`${item.to}/`),
+      );
+      if (match) return match;
+    }
+    return { label: 'Console', desc: 'MetaBot Personal Edition' };
+  }, [loc.pathname]);
 
   const toggleSidebar = () => {
     setSidebarCollapsed((cur) => {
@@ -156,6 +218,10 @@ function Shell({ children, onSignOut }: { children: React.ReactNode; onSignOut: 
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [loc.pathname]);
+
   // global shortcuts:
   //   '/'  focus search input
   //   '['  toggle sidebar
@@ -177,6 +243,8 @@ function Shell({ children, onSignOut }: { children: React.ReactNode; onSignOut: 
       } else if (e.key === 't' && !inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
         toggleTheme();
+      } else if (e.key === 'Escape') {
+        setMenuOpen(false);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -184,30 +252,49 @@ function Shell({ children, onSignOut }: { children: React.ReactNode; onSignOut: 
   }, []);
 
   return (
-    <div className={`shell${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
-      <header className="top-bar">
-        <div className="brand-row">
-          <SidebarToggle collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+    <div className={`app-shell${sidebarCollapsed ? ' sidebar-collapsed' : ''}${menuOpen ? ' menu-open' : ''}`}>
+      <div className="app-scrim" aria-hidden onClick={() => setMenuOpen(false)} />
+      <aside className="app-sidebar" aria-label="Primary navigation">
+        <div className="app-sidebar-head">
           <Brand />
         </div>
-        <SearchBar />
-        <nav className="actions">
-          <NavLink to="/" end>
-            memory
-          </NavLink>
-          <NavLink to="/users">users</NavLink>
-          <NavLink to="/skills">skills</NavLink>
-          <NavLink to="/t5t">t5t</NavLink>
-          <NavLink to="/agents">agents</NavLink>
-          <NavLink to="/chat">chat</NavLink>
-          <NavLink to="/cli">cli</NavLink>
-          <ThemeToggle theme={theme} onToggle={toggleTheme} />
-          <button className="signout" type="button" onClick={onSignOut} title="forget this browser token">
-            sign out
-          </button>
+        <nav className="app-nav">
+          {NAV_GROUPS.map((group) => (
+            <section className="app-nav-group" key={group.label}>
+              <div className="app-nav-group-label">{group.label}</div>
+              {group.items.map((item) => (
+                <NavEntry key={item.to} item={item} collapsed={sidebarCollapsed} />
+              ))}
+            </section>
+          ))}
         </nav>
-      </header>
-      {children}
+        <div className="app-sidebar-foot">
+          <SidebarToggle collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+        </div>
+      </aside>
+      <div className="app-column">
+        <header className="top-bar">
+          <div className="brand-row">
+            <SidebarToggle collapsed onToggle={() => setMenuOpen((open) => !open)} label="menu" />
+            <div className="route-title">
+              <span>{currentSection.label}</span>
+              <small>{currentSection.desc}</small>
+            </div>
+          </div>
+          <SearchBar />
+          <nav className="actions" aria-label="Console actions">
+            <span className="edition-pill">Personal</span>
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
+            <button className="signout" type="button" onClick={onSignOut} title="forget this browser token">
+              sign out
+            </button>
+          </nav>
+        </header>
+        <div className="mobile-search">
+          <SearchBar compact />
+        </div>
+        <main className="app-content">{children}</main>
+      </div>
     </div>
   );
 }
