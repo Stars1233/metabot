@@ -23,7 +23,10 @@ metabot update --package --version 1.3.0        # 固定不可变 Release v1.3.0
 metabot update --git                            # 强制 git pull + 构建 + 重启
 metabot start                       # 启动（PM2）
 metabot stop                        # 停止
-metabot restart                     # 重启
+metabot restart                     # 多 Bot 协调式 Bridge 重启
+metabot restart --bot admin --chat oc_x --reason "升级"  # 向指定会话回报
+metabot restart --no-resume         # 只通知，不自动续接被中断任务
+metabot restart --force             # 准备失败时的紧急显式覆盖
 metabot logs                        # 查看实时日志（可传 -n 100 等）
 metabot status                      # PM2 进程状态
 ```
@@ -46,6 +49,22 @@ Release。源码 checkout 会被自动识别并保留 Git 更新路径；用 `--
 
 可用 `METABOT_UPDATE_INSTALLER_URL` 覆盖 Package 镜像地址。`--version` 只接受
 `x.y.z`（可选前导 `v` 会被标准化），且不能与 `--git` 组合。
+
+### 协调式重启
+
+`metabot restart` 会先请求已鉴权的本地 Bridge 进入准备状态。Bridge 短暂停止接收新
+工作，快照所有已注册 Bot 的活跃任务，并使用每个 Bot 自己的渠道身份向受影响会话
+发送 **Restart Preparing** 卡片。如果任何受影响会话无法收到通知，重启会取消，
+Bridge 也会恢复接收工作；`--force` 是明确的紧急覆盖开关。
+
+PM2 启动新 Bridge 后，每个受影响 Bot 都会更新被中断的任务卡片、发送
+**Restart Complete** 卡片，并且只排队一次续接任务。稳定的 `--request-id` 用于去重。
+`--bot` 与 `--chat` 还能让没有活跃任务的发起会话收到结果；没有目标 chat ID 的空闲
+Bot 不会收到无目的消息。
+
+交接状态以原子写入方式保存在 `SESSION_STORE_DIR`（通常为 `~/.metabot/`）下的
+`controlled-restart.json` 和 `last-restart.json`，不会修改 session 数据库。如果 PM2
+拒绝重启，CLI 会先取消 Bridge 的准备状态并删除 breadcrumb，再返回错误。
 
 ## 2. bridge 守护进程 API
 

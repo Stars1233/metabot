@@ -72,6 +72,17 @@ Shell 历史或共享配置。
 
 不要复用 Core Token 作为 Bridge Secret。
 
+## 重启安全
+
+请使用 `metabot restart`，不要直接运行 `pm2 restart metabot`。CLI 会在整个 Bridge
+进程重启前协调所有存在活跃任务的 Bot 会话、持久化交接状态，并在新 Bridge 开始监听
+后续接被中断的用户任务。直接调用 PM2 会绕过这份协议，导致所有 Bot 未经准备就被
+中断，也不会发送完成卡片。
+
+首次升级到支持该协议的版本时，仍在运行的旧 Bridge 会对准备接口返回 404；
+`metabot update` 只为这次过渡允许兼容降级。之后的更新必须先成功完成协调准备。
+该功能不需要数据库迁移。
+
 ## 更新与回退
 
 ```bash
@@ -83,6 +94,9 @@ metabot doctor
 Package 覆盖会保留 `.env`、`bots.json`、`data/`、`logs/`，以及
 `~/.metabot/`、`~/.metabot-core/` 中的用户/Core 状态。如果新版本 smoke 失败，
 应显式重装上一已知版本，不要直接修改已安装包文件。
+
+回滚不需要改动 `sessions.db`。重新安装上一版本后，只有在确认当前没有重启进行中时，
+才清理残留的 `~/.metabot/controlled-restart.json`；旧版本本来也会忽略该文件。
 
 ## 源码部署
 

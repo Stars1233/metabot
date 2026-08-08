@@ -5,14 +5,14 @@ import * as path from 'node:path';
 /**
  * Restart breadcrumb + one-shot reminder.
  *
- * `pm2 restart` kills the whole node process — including every Claude session —
- * and respawns it. The agent that ran `metabot restart` therefore loses all
+ * `pm2 restart` kills the whole Bridge process — including every active engine
+ * turn — and respawns it. The agent that ran `metabot restart` therefore loses all
  * memory of having done so; when the next message arrives the session resumes
  * with "please restart" still in its history and the agent restarts again, in a
  * loop. To break it, `bin/metabot` writes a timestamp breadcrumb just before
- * `pm2 restart`; we read (and delete) it at boot, then inject a one-shot
- * `<system-reminder>` into the first turn of each chat telling the agent the
- * restart already happened and not to do it again.
+ * `pm2 restart`; we retain it at boot until coordinated recovery has queued
+ * every continuation. The legacy one-shot reminder remains as a compatibility
+ * fallback for breadcrumbs created by an older CLI.
  */
 
 const BREADCRUMB_FILENAME = 'last-restart.json';
@@ -30,27 +30,54 @@ function breadcrumbPath(): string {
 }
 
 /**
- * Read the restart breadcrumb at boot and stash the timestamp in memory, then
- * delete the file so a later cold start doesn't re-trigger. Call once during
- * bridge startup. Safe to call when no breadcrumb exists.
+ * Read the restart breadcrumb at boot and retain it until restart recovery has
+ * reached a durable decision. Call once during bridge startup. Safe to call
+ * when no breadcrumb exists.
  */
-export function loadRestartBreadcrumb(): void {
+export interface RestartBreadcrumb {
+  version?: number;
+  restartedAt: number;
+  requestId?: string;
+  botName?: string;
+  chatId?: string;
+  source?: string;
+  reason?: string;
+  resume?: boolean;
+}
+
+let restartBreadcrumb: RestartBreadcrumb | undefined;
+
+export function loadRestartBreadcrumb(): RestartBreadcrumb | undefined {
   const file = breadcrumbPath();
   try {
     const raw = fs.readFileSync(file, 'utf-8');
-    const parsed = JSON.parse(raw) as { restartedAt?: number };
+    const parsed = JSON.parse(raw) as Partial<RestartBreadcrumb>;
     if (typeof parsed.restartedAt === 'number') {
       restartedAtMs = parsed.restartedAt * 1000; // breadcrumb stores epoch seconds
+      restartBreadcrumb = {
+        ...parsed,
+        restartedAt: parsed.restartedAt,
+      };
     }
   } catch {
     /* missing/unreadable — nothing to do */
   }
-  // Delete regardless; the timestamp now lives in memory for this process.
+  return restartBreadcrumb;
+}
+
+export function getRestartBreadcrumb(): RestartBreadcrumb | undefined {
+  return restartBreadcrumb;
+}
+
+/** Delete a consumed breadcrumb after recovery/reporting is durably decided. */
+export function clearRestartBreadcrumb(requestId?: string): void {
+  if (requestId && restartBreadcrumb?.requestId && restartBreadcrumb.requestId !== requestId) return;
   try {
-    fs.unlinkSync(file);
+    fs.unlinkSync(breadcrumbPath());
   } catch {
     /* already gone */
   }
+  restartBreadcrumb = undefined;
 }
 
 /** True if we should inject the restart reminder for this chat's next turn. */

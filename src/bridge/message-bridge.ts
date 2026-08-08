@@ -27,6 +27,7 @@ import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
 import { shouldRemindRestart, markReminded, restartSecondsAgo } from './restart-notice.js';
+import type { RestartTaskSnapshot } from './restart-coordinator.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import { CommandHandler } from './command-handler.js';
@@ -117,6 +118,8 @@ interface RunningTask {
   processor: StreamProcessor;
   rateLimiter: RateLimiter;
   chatId: string;
+  source: 'chat' | 'api';
+  sendCards: boolean;
   /** Live snapshot of the active Agent Team, accumulated from team hooks. */
   teamState?: TeamState;
 }
@@ -125,6 +128,9 @@ interface StartingTask {
   startTime: number;
   abortController: AbortController;
   cancelled: boolean;
+  userPrompt: string;
+  source: 'chat' | 'api';
+  sendCards: boolean;
 }
 
 export interface ApiTaskOptions {
@@ -191,6 +197,8 @@ export class MessageBridge {
   /** Chats that have begun task setup but do not have an ExecutionHandle yet. */
   private startingTasks = new Map<string, StartingTask>();
   private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
+  /** Set only during the short prepare -> PM2 restart window. */
+  private restartQuiesceRequestId?: string;
   private messageQueues = new Map<string, IncomingMessage[]>(); // per-chatId message queue
   private pendingBatches = new Map<string, PendingBatch>(); // media debounce batches
   /**
@@ -477,12 +485,20 @@ export class MessageBridge {
     return this.startingTasks.has(chatId) || this.runningTasks.has(chatId);
   }
 
-  private reserveTaskStart(chatId: string): StartingTask | undefined {
-    if (this.isChatBusy(chatId)) return undefined;
+  private reserveTaskStart(
+    chatId: string,
+    userPrompt: string,
+    source: 'chat' | 'api',
+    sendCards: boolean,
+  ): StartingTask | undefined {
+    if (this.restartQuiesceRequestId || this.isChatBusy(chatId)) return undefined;
     const task: StartingTask = {
       startTime: Date.now(),
       abortController: new AbortController(),
       cancelled: false,
+      userPrompt,
+      source,
+      sendCards,
     };
     this.startingTasks.set(chatId, task);
     return task;
@@ -515,6 +531,50 @@ export class MessageBridge {
       chatId,
       startTime: task.startTime,
     }));
+  }
+
+  /** Freeze new work while the CLI checkpoints every affected chat. */
+  beginRestartQuiesce(requestId: string): void {
+    this.restartQuiesceRequestId = requestId;
+  }
+
+  /** Release a failed/cancelled prepare without disturbing another request. */
+  cancelRestartQuiesce(requestId: string): void {
+    if (this.restartQuiesceRequestId !== requestId) return;
+    this.restartQuiesceRequestId = undefined;
+    for (const chatId of this.messageQueues.keys()) {
+      if (!this.isChatBusy(chatId)) this.processQueue(chatId);
+    }
+  }
+
+  /** Snapshot all work that a process-wide Bridge restart would interrupt. */
+  getRestartTaskSnapshots(): RestartTaskSnapshot[] {
+    const snapshots: RestartTaskSnapshot[] = [];
+    for (const [chatId, task] of this.startingTasks) {
+      snapshots.push({
+        botName: this.config.name,
+        chatId,
+        userPrompt: task.userPrompt,
+        startedAt: task.startTime,
+        source: task.source,
+        sendCards: task.sendCards,
+        queuedPrompts: this.messageQueues.get(chatId)?.map((message) => message.text),
+      });
+    }
+    for (const [chatId, task] of this.runningTasks) {
+      snapshots.push({
+        botName: this.config.name,
+        chatId,
+        ...(task.cardMessageId ? { messageId: task.cardMessageId } : {}),
+        userPrompt: task.processor.getCurrentState().userPrompt,
+        startedAt: task.startTime,
+        source: task.source,
+        sendCards: task.sendCards,
+        cardState: task.processor.getCurrentState(),
+        queuedPrompts: this.messageQueues.get(chatId)?.map((message) => message.text),
+      });
+    }
+    return snapshots;
   }
 
   /** Stop a running task for the given chatId. Returns true if a task was stopped. */
@@ -1531,6 +1591,7 @@ export class MessageBridge {
    *                                    → clear goal (per Claude docs aliases)
    */
   private processQueue(chatId: string): void {
+    if (this.restartQuiesceRequestId) return;
     const queue = this.messageQueues.get(chatId);
     if (!queue || queue.length === 0) {
       this.messageQueues.delete(chatId);
@@ -1593,6 +1654,16 @@ export class MessageBridge {
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
     const { chatId, text } = msg;
+
+    if (this.restartQuiesceRequestId) {
+      await this.sender.sendTextNotice(
+        chatId,
+        'MetaBot Restart Preparing',
+        `Controlled restart ${this.restartQuiesceRequestId} is already in progress. Please resend this message after the completion card arrives.`,
+        'orange',
+      );
+      return;
+    }
 
     // Feishu users often type command names without the leading slash. Treat
     // an exact bare "reset" as /reset so it can abort a running PTY turn and
@@ -1956,7 +2027,7 @@ export class MessageBridge {
   }
 
   private async startQuery(msg: IncomingMessage): Promise<void> {
-    const startingTask = this.reserveTaskStart(msg.chatId);
+    const startingTask = this.reserveTaskStart(msg.chatId, msg.text, 'chat', true);
     if (!startingTask) {
       throw new Error(`Chat ${msg.chatId} is busy with another task`);
     }
@@ -2218,6 +2289,8 @@ export class MessageBridge {
       processor,
       rateLimiter,
       chatId,
+      source: 'chat',
+      sendCards: true,
     };
     this.releaseTaskStart(chatId, startingTask);
     this.runningTasks.set(chatId, runningTask);
@@ -2644,7 +2717,14 @@ export class MessageBridge {
 
   async executeApiTask(options: ApiTaskOptions): Promise<ApiTaskResult> {
     const { chatId } = options;
-    const startingTask = this.reserveTaskStart(chatId);
+    if (this.restartQuiesceRequestId) {
+      return {
+        success: false,
+        responseText: '',
+        error: `Bridge is preparing controlled restart ${this.restartQuiesceRequestId}`,
+      };
+    }
+    const startingTask = this.reserveTaskStart(chatId, options.prompt, 'api', options.sendCards === true);
     if (!startingTask) {
       return { success: false, responseText: '', error: 'Chat is busy with another task' };
     }
@@ -2800,6 +2880,8 @@ export class MessageBridge {
       processor,
       rateLimiter,
       chatId,
+      source: 'api',
+      sendCards,
     };
     this.releaseTaskStart(chatId, startingTask);
     this.runningTasks.set(chatId, runningTask);

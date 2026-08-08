@@ -24,7 +24,10 @@ metabot update --package --version 1.3.0        # pin immutable Release v1.3.0
 metabot update --git                            # force git pull + rebuild + restart
 metabot start                       # start with PM2
 metabot stop                        # stop
-metabot restart                     # restart
+metabot restart                     # coordinated Bridge restart
+metabot restart --bot admin --chat oc_x --reason "upgrade"  # report back to a chat
+metabot restart --no-resume         # notify, but do not queue interrupted turns
+metabot restart --force             # emergency override if prepare cannot complete
 metabot logs                        # view live logs (pass -n 100 etc.)
 metabot status                      # PM2 process status
 ```
@@ -48,6 +51,26 @@ instead of `latest`. Package updating performs:
 Override the package installer mirror with `METABOT_UPDATE_INSTALLER_URL`.
 `--version` accepts only `x.y.z` (an optional leading `v` is normalized) and
 cannot be combined with `--git`.
+
+### Coordinated restart
+
+`metabot restart` first asks the authenticated local Bridge to prepare. The
+Bridge briefly stops accepting new work, snapshots every active task across
+all registered bots, and sends a **Restart Preparing** notice to each affected
+chat using that bot's own channel identity. If any affected chat cannot be
+notified, the restart is cancelled and normal work is unfrozen. `--force` is
+the explicit emergency override.
+
+After PM2 starts the new Bridge, each affected bot updates its interrupted
+card, sends a **Restart Complete** notice, and queues exactly one continuation
+turn. A stable `--request-id` deduplicates retries. `--bot` plus `--chat` also
+reports the result to an idle requester chat; idle bots without a destination
+chat are not sent unsolicited messages.
+
+The handoff is stored atomically under `SESSION_STORE_DIR` (normally
+`~/.metabot/`) in `controlled-restart.json` and `last-restart.json`. It does not
+modify the session database. If PM2 rejects the restart, the CLI cancels the
+Bridge's prepare state and removes the breadcrumb before returning an error.
 
 ## 2. Bridge daemon API
 

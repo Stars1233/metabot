@@ -431,8 +431,16 @@ cmd_update() {
   fi
 
   info "Restarting MetaBot..."
-  _write_restart_breadcrumb
-  pm2 restart metabot 2>/dev/null || pm2 start ecosystem.config.cjs
+  local metabot_pid=""
+  metabot_pid="$(pm2 pid metabot 2>/dev/null | head -n 1 || true)"
+  if [[ "$metabot_pid" =~ ^[1-9][0-9]*$ ]]; then
+    cmd_restart --source update --reason "MetaBot update" --allow-legacy-prepare
+  else
+    # There is no running Bridge to quiesce or recover. Preserve the previous
+    # update behavior for stopped/fresh installations.
+    warn "MetaBot is not running; starting it without restart recovery."
+    pm2 start ecosystem.config.cjs
+  fi
   pm2 save --force 2>/dev/null || true
 
   success "MetaBot updated and restarted!"
@@ -469,21 +477,176 @@ _update_core_workspace() {
   ) && success "metabot-core workspace updated" || warn "metabot-core workspace update incomplete (feature CLI may be stale)"
 }
 
-# Drop a breadcrumb so the bridge knows it was just restarted. After
-# `pm2 restart` the node process (and every Claude session) is killed and
-# respawned, so the agent that issued the restart loses all memory of having
-# done so — without this it sees "please restart" in resumed history and
-# restarts again in a loop. The bridge reads + deletes this file at boot and
-# injects a one-shot "you just restarted, don't restart again" system-reminder.
+# Persist a breadcrumb only after the running Bridge has checkpointed and
+# notified every affected chat. The new process consumes it after it queues all
+# continuation turns and sends completion cards.
 _write_restart_breadcrumb() {
+  local request_id="$1"
+  local requester_bot="$2"
+  local requester_chat="$3"
+  local source="$4"
+  local reason="$5"
+  local resume="$6"
   local dir="${SESSION_STORE_DIR:-$HOME/.metabot}"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  printf '{"restartedAt": %s}\n' "$(date +%s)" > "$dir/last-restart.json" 2>/dev/null || true
+  RESTART_STATE_DIR="$dir" \
+  RESTART_REQUEST_ID="$request_id" \
+  RESTART_REQUESTER_BOT="$requester_bot" \
+  RESTART_REQUESTER_CHAT="$requester_chat" \
+  RESTART_SOURCE="$source" \
+  RESTART_REASON="$reason" \
+  RESTART_RESUME="$resume" \
+    node <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const dir = process.env.RESTART_STATE_DIR;
+if (!dir) throw new Error('restart state directory is missing');
+fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+const file = path.join(dir, 'last-restart.json');
+const temp = `${file}.${process.pid}.tmp`;
+const value = {
+  version: 1,
+  restartedAt: Math.floor(Date.now() / 1000),
+  requestId: process.env.RESTART_REQUEST_ID,
+  source: process.env.RESTART_SOURCE || 'cli',
+  resume: process.env.RESTART_RESUME !== 'false',
+};
+if (process.env.RESTART_REQUESTER_BOT) value.botName = process.env.RESTART_REQUESTER_BOT;
+if (process.env.RESTART_REQUESTER_CHAT) value.chatId = process.env.RESTART_REQUESTER_CHAT;
+if (process.env.RESTART_REASON) value.reason = process.env.RESTART_REASON;
+fs.writeFileSync(temp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+fs.renameSync(temp, file);
+NODE
+}
+
+_clear_restart_breadcrumb() {
+  local request_id="$1"
+  local dir="${SESSION_STORE_DIR:-$HOME/.metabot}"
+  RESTART_STATE_DIR="$dir" RESTART_REQUEST_ID="$request_id" node <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const file = path.join(process.env.RESTART_STATE_DIR, 'last-restart.json');
+try {
+  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!parsed.requestId || parsed.requestId === process.env.RESTART_REQUEST_ID) fs.unlinkSync(file);
+} catch {}
+NODE
+}
+
+_restart_payload() {
+  RESTART_REQUEST_ID="$1" \
+  RESTART_REQUESTER_BOT="$2" \
+  RESTART_REQUESTER_CHAT="$3" \
+  RESTART_SOURCE="$4" \
+  RESTART_REASON="$5" \
+  RESTART_RESUME="$6" \
+  RESTART_FORCE="$7" \
+    node <<'NODE'
+const value = {
+  requestId: process.env.RESTART_REQUEST_ID,
+  source: process.env.RESTART_SOURCE || 'cli',
+  resume: process.env.RESTART_RESUME !== 'false',
+  force: process.env.RESTART_FORCE === 'true',
+};
+if (process.env.RESTART_REQUESTER_BOT) value.requesterBot = process.env.RESTART_REQUESTER_BOT;
+if (process.env.RESTART_REQUESTER_CHAT) value.requesterChat = process.env.RESTART_REQUESTER_CHAT;
+if (process.env.RESTART_REASON) value.reason = process.env.RESTART_REASON;
+process.stdout.write(JSON.stringify(value));
+NODE
+}
+
+_prepare_controlled_restart() {
+  local payload="$1"
+  _load_bridge_api_config
+  local response_file
+  response_file="$(mktemp)"
+  local http_code
+  if ! http_code="$(curl -sS --connect-timeout 3 --max-time 30 -o "$response_file" -w '%{http_code}' \
+    -X POST -H "$METABOT_AUTH" -H 'Content-Type: application/json' \
+    --data "$payload" "$METABOT_URL/api/runtime/restart/prepare")"; then
+    rm -f "$response_file"
+    return 2
+  fi
+  if [[ "$http_code" == 2* ]]; then
+    cat "$response_file"
+    rm -f "$response_file"
+    return 0
+  fi
+  if [[ "$http_code" == "404" ]]; then
+    rm -f "$response_file"
+    return 44
+  fi
+  error "Bridge rejected controlled restart preparation (HTTP $http_code): $(cat "$response_file")"
+  rm -f "$response_file"
+  return 1
+}
+
+_cancel_controlled_restart() {
+  local request_id="$1"
+  _load_bridge_api_config
+  local payload
+  payload="$(RESTART_REQUEST_ID="$request_id" node -e 'process.stdout.write(JSON.stringify({requestId: process.env.RESTART_REQUEST_ID}))')"
+  curl -fsS -X POST -H "$METABOT_AUTH" -H 'Content-Type: application/json' \
+    --data "$payload" "$METABOT_URL/api/runtime/restart/cancel" >/dev/null 2>&1 || true
 }
 
 cmd_start()   { pm2 start "$METABOT_HOME/ecosystem.config.cjs"; pm2 save --force 2>/dev/null || true; }
 cmd_stop()    { pm2 stop metabot; }
-cmd_restart() { _write_restart_breadcrumb; pm2 restart metabot; }
+cmd_restart() {
+  local request_id=""
+  local requester_bot="${METABOT_BOT_NAME:-}"
+  local requester_chat="${METABOT_CHAT_ID:-}"
+  local source="cli"
+  local reason="MetaBot Bridge restart"
+  local resume=true
+  local force=false
+  local allow_legacy_prepare=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --request-id) request_id="${2:?--request-id requires a value}"; shift 2 ;;
+      --bot) requester_bot="${2:?--bot requires a value}"; shift 2 ;;
+      --chat) requester_chat="${2:?--chat requires a value}"; shift 2 ;;
+      --source) source="${2:?--source requires a value}"; shift 2 ;;
+      --reason) reason="${2:?--reason requires a value}"; shift 2 ;;
+      --resume) resume=true; shift ;;
+      --no-resume) resume=false; shift ;;
+      --force) force=true; shift ;;
+      --allow-legacy-prepare) allow_legacy_prepare=true; shift ;;
+      --help|-h)
+        echo "Usage: metabot restart [--request-id ID] [--bot NAME --chat ID] [--reason TEXT] [--resume|--no-resume] [--force]"
+        return 0
+        ;;
+      *) error "Unknown restart option: $1"; return 2 ;;
+    esac
+  done
+
+  request_id="${request_id:-restart-$(node -e 'console.log(require("node:crypto").randomUUID())')}"
+  local payload
+  payload="$(_restart_payload "$request_id" "$requester_bot" "$requester_chat" "$source" "$reason" "$resume" "$force")"
+  local prepared=false
+  local prepare_rc=0
+  if _prepare_controlled_restart "$payload" >/dev/null; then
+    prepared=true
+  else
+    prepare_rc=$?
+    if [[ "$prepare_rc" -eq 44 && "$allow_legacy_prepare" == true ]]; then
+      warn "Running Bridge predates coordinated restart preparation; proceeding once for upgrade compatibility."
+    elif [[ "$force" == true ]]; then
+      warn "Controlled restart preparation failed; --force accepts that active work may not resume."
+    else
+      error "Restart cancelled because the Bridge could not checkpoint and notify all affected chats."
+      return 1
+    fi
+  fi
+
+  _write_restart_breadcrumb "$request_id" "$requester_bot" "$requester_chat" "$source" "$reason" "$resume"
+  if ! pm2 restart metabot; then
+    [[ "$prepared" == true ]] && _cancel_controlled_restart "$request_id"
+    _clear_restart_breadcrumb "$request_id"
+    error "PM2 rejected controlled restart $request_id; Bridge quiesce was cancelled."
+    return 1
+  fi
+  success "Controlled restart submitted (requestId: $request_id)."
+}
 cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
 
@@ -1622,7 +1785,7 @@ print_help() {
   echo "    metabot update --git      Git pull, rebuild, and restart"
   echo "    metabot start      Start MetaBot with PM2"
   echo "    metabot stop       Stop MetaBot"
-  echo "    metabot restart    Restart MetaBot"
+  echo "    metabot restart    Coordinated restart: checkpoint and resume all affected bot chats"
   echo "    metabot logs       View live logs (pass -n 100 etc.)"
   echo "    metabot status     Show PM2 process status"
   echo "    metabot doctor     Agent-readable runtime diagnostics (--json)"
@@ -1647,7 +1810,7 @@ case "${1:-}" in
   update|up)    shift; cmd_update "$@" ;;
   start)        cmd_start ;;
   stop)         cmd_stop ;;
-  restart|rs)   cmd_restart ;;
+  restart|rs)   shift; cmd_restart "$@" ;;
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
   doctor)       shift; cmd_doctor "$@" ;;
