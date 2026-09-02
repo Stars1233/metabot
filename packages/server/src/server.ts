@@ -561,7 +561,7 @@ export function startServer(options: ServerOptions): ServerHandle {
   const chatStore = new ChatStore(db, logger.child({ module: 'chat' }));
   const messageStore = new MessageStore(db, logger.child({ module: 'messages' }));
   const busEventHub = new BusEventHub();
-  const chatEventHub = new ChatEventHub();
+  const chatEventHub = new ChatEventHub(chatStore);
   const t5tFolderIds = loadT5tFolderIds(process.env, memoryStore, logger.child({ module: 't5t-folders' }));
   const t5tStore = new T5tStore(memoryStore, t5tFolderIds, logger.child({ module: 't5t' }));
   const auditLog = createDefaultAuditLog(dataDir, logger);
@@ -1088,6 +1088,13 @@ export function startServer(options: ServerOptions): ServerHandle {
         const conversationId = decodeURIComponent(chatParticipantsMatch[1]);
         const body = await parseJsonBody(req);
         return jsonResult(res, chatRoutes.addParticipant(chatDeps, conversationId, body, cred));
+      }
+      const chatStreamMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/stream$/);
+      if (chatStreamMatch && method === 'GET') {
+        const conversationId = decodeURIComponent(chatStreamMatch[1]);
+        const result = chatRoutes.streamConversation(chatDeps, conversationId, req, res, cred);
+        if (result) return jsonResult(res, result);
+        return;
       }
       const chatRunsMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/runs$/);
       if (chatRunsMatch && method === 'GET') {
