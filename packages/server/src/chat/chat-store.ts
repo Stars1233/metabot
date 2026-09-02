@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type Database from 'better-sqlite3';
@@ -188,11 +189,22 @@ interface RawFileRow {
 export class ChatStore {
   private db: Database.Database;
   private logger: Logger;
+  /** In-process fan-out for chat SSE subscribers. */
+  readonly events = new EventEmitter();
 
   constructor(db: Database.Database, logger: Logger) {
     this.db = db;
     this.logger = logger;
+    this.events.setMaxListeners(0);
     this.initSchema();
+  }
+
+  private emitLive(event: import('./chat-types.js').ChatLiveEvent): void {
+    try {
+      this.events.emit('chat', event);
+    } catch (err) {
+      this.logger.warn({ err, type: event.type, conversationId: event.conversationId }, 'chat live event listener threw');
+    }
   }
 
   private initSchema(): void {
@@ -573,7 +585,9 @@ export class ChatStore {
     if (input.senderKind === 'user') {
       this.markReadUnchecked(input.conversationId, input.senderRef, id, now);
     }
-    return this.getMessage(id)!;
+    const message = this.getMessage(id)!;
+    this.emitLive({ type: 'message.created', conversationId: input.conversationId, message });
+    return message;
   }
 
   listMessages(
@@ -654,7 +668,9 @@ export class ChatStore {
         now,
         now,
       );
-    return this.getRun(id)!;
+    const run = this.getRun(id)!;
+    this.emitLive({ type: 'run.updated', conversationId: input.conversationId, run });
+    return run;
   }
 
   getRunForUser(runId: string, userRef: string): ChatRun {
@@ -728,6 +744,7 @@ export class ChatStore {
     const run = this.getRun(input.runId);
     if (!run) throw Object.assign(new Error('run_not_found'), { statusCode: 404 });
 
+    let inserted = false;
     const tx = this.db.transaction(() => {
       const payloadJson = JSON.stringify(input.payload);
       const existing = this.db
@@ -753,6 +770,7 @@ export class ChatStore {
       `,
         )
         .run(id, input.runId, input.seq, input.kind, payloadJson, now);
+      inserted = true;
 
       if (input.kind === 'state') {
         this.updateRunStatus(input.runId, payloadStatus(input.payload) || 'running', now);
@@ -775,7 +793,24 @@ export class ChatStore {
       const row = this.db.prepare('SELECT * FROM chat_run_events WHERE id = ?').get(id) as RawRunEventRow;
       return rowToRunEvent(row);
     });
-    return tx();
+    const event = tx();
+    const updatedRun = this.getRun(input.runId);
+    if (updatedRun && inserted) {
+      this.emitLive({ type: 'run.event', conversationId: updatedRun.conversationId, runId: updatedRun.id, event });
+      this.emitLive({ type: 'run.updated', conversationId: updatedRun.conversationId, run: updatedRun });
+      if (event.kind === 'complete' && updatedRun.finalMessageId) {
+        const message = this.getMessage(updatedRun.finalMessageId);
+        if (message) this.emitLive({ type: 'message.created', conversationId: updatedRun.conversationId, message });
+      }
+      if (event.kind === 'file') {
+        const rows = this.db.prepare('SELECT * FROM chat_files WHERE run_id = ? ORDER BY created_at ASC, id ASC').all(updatedRun.id) as RawFileRow[];
+        for (const row of rows) {
+          const file = rowToFile(row);
+          this.emitLive({ type: 'file.created', conversationId: updatedRun.conversationId, file });
+        }
+      }
+    }
+    return event;
   }
 
   listRunEventsForUser(runId: string, userRef: string): ChatRunEvent[] {

@@ -1,6 +1,8 @@
+import type * as http from 'node:http';
 import type { Credential } from '../auth/credentials.js';
 import type { AgentRecord, AgentStore } from '../agents/agent-store.js';
 import type { ChatStore } from './chat-store.js';
+import type { ChatEventHub } from './chat-events.js';
 import { ChatForbiddenError, ChatNotFoundError } from './chat-store.js';
 import type {
   ChatParticipantCandidate,
@@ -18,6 +20,7 @@ export interface RouteResult {
 export interface ChatRouteDeps {
   chat: ChatStore;
   agents: AgentStore;
+  events: ChatEventHub;
   deliverRun?: (run: {
     id: string;
     conversationId: string;
@@ -230,6 +233,25 @@ export function listParticipants(deps: ChatRouteDeps, id: string, cred: Credenti
     status: 200,
     body: { participants: deps.chat.listParticipants(id, userRef(cred)) },
   }));
+}
+
+/** Open a participant-scoped SSE stream for live conversation updates. */
+export function streamConversation(
+  deps: ChatRouteDeps,
+  id: string,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  cred: Credential,
+): RouteResult | null {
+  try {
+    deps.chat.getConversationForUser(id, userRef(cred));
+  } catch (e) {
+    if (e instanceof ChatNotFoundError) return err(404, 'conversation_not_found');
+    if (e instanceof ChatForbiddenError) return err(403, 'chat_participant_required');
+    throw e;
+  }
+  deps.events.stream(req, res, id, userRef(cred));
+  return null;
 }
 
 export function addParticipant(
