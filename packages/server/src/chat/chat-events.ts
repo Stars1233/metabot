@@ -25,7 +25,6 @@ export class ChatEventHub {
       'X-Accel-Buffering': 'no',
     });
     let closed = false;
-    let heartbeat: NodeJS.Timeout;
     const cleanup = (): void => {
       if (closed) return;
       closed = true;
@@ -48,6 +47,10 @@ export class ChatEventHub {
     };
     this.store.events.on('chat', listener);
     this.clients.set(conversationId, this.clientCount(conversationId) + 1);
+    const heartbeat = setInterval(() => {
+      try { res.write(': hb\n\n'); } catch { cleanup(); }
+    }, this.heartbeatMs);
+    if (typeof heartbeat.unref === 'function') heartbeat.unref();
     write('snapshot', {
       messages: this.store.listMessages(conversationId, userRef, { limit: 50 }),
       runs: this.store.listRuns(conversationId, userRef).filter((run) =>
@@ -55,10 +58,6 @@ export class ChatEventHub {
       ),
       files: this.store.listFiles(conversationId, userRef),
     });
-    heartbeat = setInterval(() => {
-      try { res.write(': hb\n\n'); } catch { cleanup(); }
-    }, this.heartbeatMs);
-    if (typeof heartbeat.unref === 'function') heartbeat.unref();
     req.on('close', cleanup);
     req.on('error', cleanup);
     res.on('close', cleanup);
