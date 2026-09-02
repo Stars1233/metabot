@@ -23,10 +23,6 @@ const FALLBACK_CODEX_CONTEXT_WINDOW = 272000;
 const CODEX_AUTH_ENV_VARS = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'];
 const CODEX_EXIT_GRACE_MS = 1000;
 
-export function resolveCodexPath(explicitPath?: string): string {
-  const override = explicitPath || process.env.CODEX_EXECUTABLE_PATH;
-  if (override && existsSync(override)) return override;
-
 function findWindowsCodexBinary(npmPrefix: string | undefined): string | undefined {
   if (!npmPrefix) return undefined;
 
@@ -76,6 +72,10 @@ export function buildCodexSpawnCommand(
   }
   return { command: executable, args };
 }
+
+export function resolveCodexPath(explicitPath?: string): string {
+  const override = explicitPath || process.env.CODEX_EXECUTABLE_PATH;
+  if (override && existsSync(override)) return override;
 
   try {
     if (isWindows) {
