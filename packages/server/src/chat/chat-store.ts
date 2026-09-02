@@ -16,6 +16,7 @@ import type {
   ChatRun,
   ChatRunEvent,
   ChatRunEventKind,
+  ChatRunPresentation,
   ChatRunStatus,
   ChatFile,
 } from './chat-types.js';
@@ -70,6 +71,8 @@ export interface AppendMessageInput {
   content: string;
   mentionedAgentRefs?: string[];
   runId?: string | null;
+  replyTo?: string | null;
+  senderSessionId?: string | null;
 }
 
 export interface CreateRunInput {
@@ -78,6 +81,9 @@ export interface CreateRunInput {
   targetAgentRef: string;
   engine?: string | null;
   model?: string | null;
+  idempotencyOwner?: string | null;
+  idempotencyKey?: string | null;
+  presentation?: ChatRunPresentation | null;
 }
 
 export interface AppendRunEventInput {
@@ -127,6 +133,8 @@ interface RawMessageRow {
   content: string;
   mentioned_agent_refs: string;
   run_id: string | null;
+  reply_to?: string | null;
+  sender_session_id?: string | null;
   created_at: string;
 }
 
@@ -150,6 +158,9 @@ interface RawRunRow {
   completed_at: string | null;
   error: string | null;
   final_message_id: string | null;
+  idempotency_owner?: string | null;
+  idempotency_key?: string | null;
+  presentation_json?: string | null;
 }
 
 interface RawRunEventRow {
@@ -215,8 +226,10 @@ export class ChatStore {
         sender_ref           TEXT NOT NULL,
         sender_display_name  TEXT NOT NULL,
         content              TEXT NOT NULL,
-        mentioned_agent_refs TEXT NOT NULL DEFAULT '[]',
-        run_id               TEXT,
+      mentioned_agent_refs TEXT NOT NULL DEFAULT '[]',
+      run_id               TEXT,
+        reply_to             TEXT,
+        sender_session_id    TEXT,
         created_at           TEXT NOT NULL,
         FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
       );
@@ -237,6 +250,9 @@ export class ChatStore {
         target_agent_ref   TEXT NOT NULL,
         engine             TEXT,
         model              TEXT,
+        idempotency_owner  TEXT,
+        idempotency_key    TEXT,
+        presentation_json  TEXT,
         status             TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting_user', 'completed', 'failed', 'canceled')),
         created_at         TEXT NOT NULL,
         updated_at         TEXT NOT NULL,
@@ -292,6 +308,14 @@ export class ChatStore {
     `);
     this.ensureColumn('chat_runs', 'engine', 'TEXT');
     this.ensureColumn('chat_runs', 'model', 'TEXT');
+    this.ensureColumn('chat_runs', 'idempotency_owner', 'TEXT');
+    this.ensureColumn('chat_runs', 'idempotency_key', 'TEXT');
+    this.ensureColumn('chat_runs', 'presentation_json', 'TEXT');
+    this.ensureColumn('chat_messages', 'reply_to', 'TEXT');
+    this.ensureColumn('chat_messages', 'sender_session_id', 'TEXT');
+    this.db.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS chat_runs_idempotency_idx ON chat_runs(idempotency_owner, idempotency_key) WHERE idempotency_key IS NOT NULL',
+    );
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -313,10 +337,14 @@ export class ChatStore {
     const title = normalizeTitle(input.title, input.kind, participants, input.createdBy);
 
     const insert = this.db.transaction(() => {
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO chat_conversations (id, kind, title, created_by, created_at, updated_at, last_message_at)
         VALUES (?, ?, ?, ?, ?, ?, NULL)
-      `).run(id, input.kind, title, input.createdBy, now, now);
+      `,
+        )
+        .run(id, input.kind, title, input.createdBy, now, now);
       const stmt = this.db.prepare(`
         INSERT INTO chat_participants (conversation_id, kind, ref, display_name, added_by, added_at)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -332,7 +360,9 @@ export class ChatStore {
   }
 
   findAgentDm(userRef: string, agentRef: string): ChatConversationSummary | null {
-    const row = this.db.prepare(`
+    const row = this.db
+      .prepare(
+        `
       SELECT c.*
         FROM chat_conversations c
         JOIN chat_participants u
@@ -343,7 +373,9 @@ export class ChatStore {
          AND (SELECT COUNT(*) FROM chat_participants p WHERE p.conversation_id = c.id) = 2
        ORDER BY c.updated_at DESC
        LIMIT 1
-    `).get(userRef, agentRef) as RawConversationRow | undefined;
+    `,
+      )
+      .get(userRef, agentRef) as RawConversationRow | undefined;
     if (!row) return null;
     return this.summaryFromConversation(row, userRef);
   }
@@ -359,16 +391,16 @@ export class ChatStore {
       kind: 'dm',
       title: input.agentDisplayName || input.agentRef,
       createdBy: input.userRef,
-      participants: [
-        { kind: 'agent', ref: input.agentRef, displayName: input.agentDisplayName || input.agentRef },
-      ],
+      participants: [{ kind: 'agent', ref: input.agentRef, displayName: input.agentDisplayName || input.agentRef }],
     });
   }
 
   findUserDm(userRef: string, otherUserRef: string): ChatConversationSummary | null {
     const normalizedUser = normalizeRef('user', userRef);
     const normalizedOther = normalizeRef('user', otherUserRef);
-    const row = this.db.prepare(`
+    const row = this.db
+      .prepare(
+        `
       SELECT c.*
         FROM chat_conversations c
         JOIN chat_participants u
@@ -379,7 +411,9 @@ export class ChatStore {
          AND (SELECT COUNT(*) FROM chat_participants p WHERE p.conversation_id = c.id) = 2
        ORDER BY c.updated_at DESC
        LIMIT 1
-    `).get(normalizedUser, normalizedOther) as RawConversationRow | undefined;
+    `,
+      )
+      .get(normalizedUser, normalizedOther) as RawConversationRow | undefined;
     if (!row) return null;
     return this.summaryFromConversation(row, normalizedUser);
   }
@@ -400,9 +434,7 @@ export class ChatStore {
       kind: 'dm',
       title: input.otherDisplayName || otherUserRef,
       createdBy: userRef,
-      participants: [
-        { kind: 'user', ref: otherUserRef, displayName: input.otherDisplayName || otherUserRef },
-      ],
+      participants: [{ kind: 'user', ref: otherUserRef, displayName: input.otherDisplayName || otherUserRef }],
     });
   }
 
@@ -411,7 +443,9 @@ export class ChatStore {
     const capped = Math.min(Math.max(limit, 1), 50);
     if (!q) return [];
     const like = `%${q.replace(/[%_]/g, '\\$&')}%`;
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT ref, MAX(display_name) AS display_name
         FROM chat_participants
        WHERE kind = 'user'
@@ -419,7 +453,9 @@ export class ChatStore {
        GROUP BY ref
        ORDER BY ref ASC
        LIMIT ?
-    `).all(like, like, capped) as Array<{ ref: string; display_name: string | null }>;
+    `,
+      )
+      .all(like, like, capped) as Array<{ ref: string; display_name: string | null }>;
     return rows.map((row) => ({
       kind: 'user',
       ref: row.ref,
@@ -430,20 +466,25 @@ export class ChatStore {
 
   getConversationForUser(id: string, userRef: string): ChatConversationSummary {
     this.assertParticipant(id, 'user', userRef);
-    const row = this.db.prepare('SELECT * FROM chat_conversations WHERE id = ?')
-      .get(id) as RawConversationRow | undefined;
+    const row = this.db.prepare('SELECT * FROM chat_conversations WHERE id = ?').get(id) as
+      | RawConversationRow
+      | undefined;
     if (!row) throw new ChatNotFoundError(id);
     return this.summaryFromConversation(row, userRef);
   }
 
   listConversationsForUser(userRef: string): ChatConversationSummary[] {
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT c.*
         FROM chat_conversations c
         JOIN chat_participants p ON p.conversation_id = c.id
        WHERE p.kind = 'user' AND p.ref = ?
        ORDER BY COALESCE(c.last_message_at, c.updated_at) DESC, c.created_at DESC
-    `).all(userRef) as RawConversationRow[];
+    `,
+      )
+      .all(userRef) as RawConversationRow[];
     return rows.map((row) => this.summaryFromConversation(row, userRef));
   }
 
@@ -453,8 +494,9 @@ export class ChatStore {
     participant: { kind: ChatParticipantKind; ref: string; displayName?: string },
   ): ChatParticipant {
     this.assertParticipant(conversationId, 'user', actorUserRef);
-    const conv = this.db.prepare('SELECT kind, created_by FROM chat_conversations WHERE id = ?')
-      .get(conversationId) as { kind: ChatConversationKind; created_by: string } | undefined;
+    const conv = this.db.prepare('SELECT kind, created_by FROM chat_conversations WHERE id = ?').get(conversationId) as
+      | { kind: ChatConversationKind; created_by: string }
+      | undefined;
     if (!conv) throw new ChatNotFoundError(conversationId);
     if (conv.created_by !== actorUserRef) {
       throw Object.assign(new Error('chat_owner_required'), { statusCode: 403 });
@@ -463,17 +505,21 @@ export class ChatStore {
       throw Object.assign(new Error('dm_participants_immutable'), { statusCode: 409 });
     }
     const now = new Date().toISOString();
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT OR IGNORE INTO chat_participants (conversation_id, kind, ref, display_name, added_by, added_at)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      conversationId,
-      participant.kind,
-      normalizeRef(participant.kind, participant.ref),
-      participant.displayName || normalizeRef(participant.kind, participant.ref),
-      actorUserRef,
-      now,
-    );
+    `,
+      )
+      .run(
+        conversationId,
+        participant.kind,
+        normalizeRef(participant.kind, participant.ref),
+        participant.displayName || normalizeRef(participant.kind, participant.ref),
+        actorUserRef,
+        now,
+      );
     this.db.prepare('UPDATE chat_conversations SET updated_at = ? WHERE id = ?').run(now, conversationId);
     return this.getParticipant(conversationId, participant.kind, participant.ref)!;
   }
@@ -492,28 +538,38 @@ export class ChatStore {
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
     const mentioned = dedupeStrings(input.mentionedAgentRefs || []);
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO chat_messages (
         id, conversation_id, kind, sender_kind, sender_ref, sender_display_name,
-        content, mentioned_agent_refs, run_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      input.conversationId,
-      input.kind,
-      input.senderKind,
-      input.senderRef,
-      input.senderDisplayName || input.senderRef,
-      content,
-      JSON.stringify(mentioned),
-      input.runId || null,
-      now,
-    );
-    this.db.prepare(`
+        content, mentioned_agent_refs, run_id, reply_to, sender_session_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+      )
+      .run(
+        id,
+        input.conversationId,
+        input.kind,
+        input.senderKind,
+        input.senderRef,
+        input.senderDisplayName || input.senderRef,
+        content,
+        JSON.stringify(mentioned),
+        input.runId || null,
+        input.replyTo || null,
+        input.senderSessionId || null,
+        now,
+      );
+    this.db
+      .prepare(
+        `
       UPDATE chat_conversations
          SET updated_at = ?, last_message_at = ?
        WHERE id = ?
-    `).run(now, now, input.conversationId);
+    `,
+      )
+      .run(now, now, input.conversationId);
     if (input.senderKind === 'user') {
       this.markReadUnchecked(input.conversationId, input.senderRef, id, now);
     }
@@ -529,29 +585,37 @@ export class ChatStore {
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
     const before = options.before;
     const rows = before
-      ? this.db.prepare(`
+      ? (this.db
+          .prepare(
+            `
           SELECT * FROM chat_messages
            WHERE conversation_id = ? AND rowid < (
              SELECT rowid FROM chat_messages WHERE id = ? AND conversation_id = ?
            )
            ORDER BY rowid DESC
            LIMIT ?
-        `).all(conversationId, before, conversationId, limit) as RawMessageRow[]
-      : this.db.prepare(`
+        `,
+          )
+          .all(conversationId, before, conversationId, limit) as RawMessageRow[])
+      : (this.db
+          .prepare(
+            `
           SELECT * FROM chat_messages
            WHERE conversation_id = ?
            ORDER BY rowid DESC
            LIMIT ?
-        `).all(conversationId, limit) as RawMessageRow[];
+        `,
+          )
+          .all(conversationId, limit) as RawMessageRow[]);
     return rows.map(rowToMessage).reverse();
   }
 
   markRead(conversationId: string, userRef: string, messageId: string | null): ChatReadState {
     this.assertParticipant(conversationId, 'user', userRef);
     if (messageId !== null) {
-      const row = this.db.prepare(
-        'SELECT id FROM chat_messages WHERE conversation_id = ? AND id = ?',
-      ).get(conversationId, messageId);
+      const row = this.db
+        .prepare('SELECT id FROM chat_messages WHERE conversation_id = ? AND id = ?')
+        .get(conversationId, messageId);
       if (!row) throw Object.assign(new Error('message_not_found'), { statusCode: 404 });
     }
     const now = new Date().toISOString();
@@ -567,21 +631,29 @@ export class ChatStore {
     }
     const now = new Date().toISOString();
     const id = crypto.randomUUID();
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO chat_runs (
-        id, conversation_id, trigger_message_id, target_agent_ref, engine, model, status,
+        id, conversation_id, trigger_message_id, target_agent_ref, engine, model,
+        idempotency_owner, idempotency_key, presentation_json, status,
         created_at, updated_at, completed_at, error, final_message_id
-      ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL)
-    `).run(
-      id,
-      input.conversationId,
-      input.triggerMessageId,
-      input.targetAgentRef,
-      cleanOptional(input.engine),
-      cleanOptional(input.model),
-      now,
-      now,
-    );
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, NULL, NULL, NULL)
+    `,
+      )
+      .run(
+        id,
+        input.conversationId,
+        input.triggerMessageId,
+        input.targetAgentRef,
+        cleanOptional(input.engine),
+        cleanOptional(input.model),
+        cleanOptional(input.idempotencyOwner),
+        cleanOptional(input.idempotencyKey),
+        input.presentation ? JSON.stringify(input.presentation) : null,
+        now,
+        now,
+      );
     return this.getRun(id)!;
   }
 
@@ -593,18 +665,59 @@ export class ChatStore {
   }
 
   getRun(runId: string): ChatRun | null {
-    const row = this.db.prepare('SELECT * FROM chat_runs WHERE id = ?')
-      .get(runId) as RawRunRow | undefined;
+    const row = this.db.prepare('SELECT * FROM chat_runs WHERE id = ?').get(runId) as RawRunRow | undefined;
     return row ? rowToRun(row) : null;
+  }
+
+  getRunByIdempotency(owner: string, key: string): ChatRun | null {
+    const row = this.db
+      .prepare('SELECT * FROM chat_runs WHERE idempotency_owner = ? AND idempotency_key = ?')
+      .get(owner, key) as RawRunRow | undefined;
+    return row ? rowToRun(row) : null;
+  }
+
+  getRunByTriggerMessageId(messageId: string): ChatRun | null {
+    const row = this.db.prepare('SELECT * FROM chat_runs WHERE trigger_message_id = ?').get(messageId) as
+      | RawRunRow
+      | undefined;
+    return row ? rowToRun(row) : null;
+  }
+
+  appendMessageAndCreateRun(
+    message: AppendMessageInput,
+    run: Omit<CreateRunInput, 'triggerMessageId'>,
+  ): { message: ChatMessage; run: ChatRun; idempotentReplay: boolean } {
+    if (run.idempotencyOwner && run.idempotencyKey) {
+      const prior = this.getRunByIdempotency(run.idempotencyOwner, run.idempotencyKey);
+      if (prior) return { message: this.getMessage(prior.triggerMessageId)!, run: prior, idempotentReplay: true };
+    }
+    const created = this.appendMessage(message);
+    try {
+      const createdRun = this.createRun({ ...run, triggerMessageId: created.id });
+      return { message: created, run: createdRun, idempotentReplay: false };
+    } catch (error) {
+      // A concurrent retry may win the unique idempotency index between the
+      // lookup above and INSERT. Return that canonical run instead of leaking
+      // a SQLite constraint error to the caller.
+      if (run.idempotencyOwner && run.idempotencyKey) {
+        const prior = this.getRunByIdempotency(run.idempotencyOwner, run.idempotencyKey);
+        if (prior) return { message: this.getMessage(prior.triggerMessageId)!, run: prior, idempotentReplay: true };
+      }
+      throw error;
+    }
   }
 
   listRuns(conversationId: string, userRef: string): ChatRun[] {
     this.assertParticipant(conversationId, 'user', userRef);
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT * FROM chat_runs
        WHERE conversation_id = ?
        ORDER BY created_at ASC, id ASC
-    `).all(conversationId) as RawRunRow[];
+    `,
+      )
+      .all(conversationId) as RawRunRow[];
     return rows.map(rowToRun);
   }
 
@@ -617,7 +730,8 @@ export class ChatStore {
 
     const tx = this.db.transaction(() => {
       const payloadJson = JSON.stringify(input.payload);
-      const existing = this.db.prepare('SELECT * FROM chat_run_events WHERE run_id = ? AND seq = ?')
+      const existing = this.db
+        .prepare('SELECT * FROM chat_run_events WHERE run_id = ? AND seq = ?')
         .get(input.runId, input.seq) as RawRunEventRow | undefined;
       if (existing) {
         if (existing.kind !== input.kind || existing.payload_json !== payloadJson) {
@@ -631,10 +745,14 @@ export class ChatStore {
 
       const now = new Date().toISOString();
       const id = crypto.randomUUID();
-      this.db.prepare(`
+      this.db
+        .prepare(
+          `
         INSERT INTO chat_run_events (id, run_id, seq, kind, payload_json, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(id, input.runId, input.seq, input.kind, payloadJson, now);
+      `,
+        )
+        .run(id, input.runId, input.seq, input.kind, payloadJson, now);
 
       if (input.kind === 'state') {
         this.updateRunStatus(input.runId, payloadStatus(input.payload) || 'running', now);
@@ -654,8 +772,7 @@ export class ChatStore {
         this.updateRunStatus(input.runId, run.status === 'queued' ? 'running' : run.status, now);
       }
 
-      const row = this.db.prepare('SELECT * FROM chat_run_events WHERE id = ?')
-        .get(id) as RawRunEventRow;
+      const row = this.db.prepare('SELECT * FROM chat_run_events WHERE id = ?').get(id) as RawRunEventRow;
       return rowToRunEvent(row);
     });
     return tx();
@@ -663,11 +780,15 @@ export class ChatStore {
 
   listRunEventsForUser(runId: string, userRef: string): ChatRunEvent[] {
     const run = this.getRunForUser(runId, userRef);
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT * FROM chat_run_events
        WHERE run_id = ?
        ORDER BY seq ASC
-    `).all(run.id) as RawRunEventRow[];
+    `,
+      )
+      .all(run.id) as RawRunEventRow[];
     return rows.map(rowToRunEvent);
   }
 
@@ -678,25 +799,28 @@ export class ChatStore {
 
   listFiles(conversationId: string, userRef: string): ChatFile[] {
     this.assertParticipant(conversationId, 'user', userRef);
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT * FROM chat_files
        WHERE conversation_id = ?
        ORDER BY created_at ASC, id ASC
-    `).all(conversationId) as RawFileRow[];
+    `,
+      )
+      .all(conversationId) as RawFileRow[];
     return rows.map(rowToFile);
   }
 
-  private updateRunStatus(
-    runId: string,
-    status: ChatRunStatus,
-    updatedAt: string,
-    error?: string | null,
-  ): void {
-    this.db.prepare(`
+  private updateRunStatus(runId: string, status: ChatRunStatus, updatedAt: string, error?: string | null): void {
+    this.db
+      .prepare(
+        `
       UPDATE chat_runs
          SET status = ?, updated_at = ?, error = COALESCE(?, error)
        WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')
-    `).run(status, updatedAt, error ?? null, runId);
+    `,
+      )
+      .run(status, updatedAt, error ?? null, runId);
   }
 
   private completeRun(run: ChatRun, payload: Record<string, unknown>, at: string): void {
@@ -705,30 +829,34 @@ export class ChatStore {
     const content = payloadContent(payload);
     if (!content) throw Object.assign(new Error('complete_content_required'), { statusCode: 400 });
     const messageId = crypto.randomUUID();
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO chat_messages (
         id, conversation_id, kind, sender_kind, sender_ref, sender_display_name,
         content, mentioned_agent_refs, run_id, created_at
       ) VALUES (?, ?, 'assistant', 'agent', ?, ?, ?, '[]', ?, ?)
-    `).run(
-      messageId,
-      fresh.conversationId,
-      fresh.targetAgentRef,
-      fresh.targetAgentRef,
-      content,
-      fresh.id,
-      at,
-    );
-    this.db.prepare(`
+    `,
+      )
+      .run(messageId, fresh.conversationId, fresh.targetAgentRef, fresh.targetAgentRef, content, fresh.id, at);
+    this.db
+      .prepare(
+        `
       UPDATE chat_runs
          SET status = 'completed', updated_at = ?, completed_at = ?, final_message_id = ?
        WHERE id = ?
-    `).run(at, at, messageId, fresh.id);
-    this.db.prepare(`
+    `,
+      )
+      .run(at, at, messageId, fresh.id);
+    this.db
+      .prepare(
+        `
       UPDATE chat_conversations
          SET updated_at = ?, last_message_at = ?
        WHERE id = ?
-    `).run(at, at, fresh.conversationId);
+    `,
+      )
+      .run(at, at, fresh.conversationId);
   }
 
   private recordFilesFromPayload(run: ChatRun, payload: Record<string, unknown>, at: string): void {
@@ -738,111 +866,138 @@ export class ChatStore {
       const file = raw as Record<string, unknown>;
       const name = typeof file.name === 'string' ? file.name.trim() : '';
       if (!name) continue;
-      const mimeType = typeof file.mimeType === 'string'
-        ? file.mimeType
-        : typeof file.mime_type === 'string' ? file.mime_type : 'application/octet-stream';
-      const sizeBytes = typeof file.sizeBytes === 'number'
-        ? file.sizeBytes
-        : typeof file.size_bytes === 'number' ? file.size_bytes : null;
+      const mimeType =
+        typeof file.mimeType === 'string'
+          ? file.mimeType
+          : typeof file.mime_type === 'string'
+            ? file.mime_type
+            : 'application/octet-stream';
+      const sizeBytes =
+        typeof file.sizeBytes === 'number'
+          ? file.sizeBytes
+          : typeof file.size_bytes === 'number'
+            ? file.size_bytes
+            : null;
       const storageKey = typeof file.storageKey === 'string' ? file.storageKey : undefined;
-      this.createFileUnchecked({
-        conversationId: run.conversationId,
-        runId: run.id,
-        name,
-        mimeType,
-        sizeBytes,
-        storageKey,
-        createdBy: run.targetAgentRef,
-      }, at);
+      this.createFileUnchecked(
+        {
+          conversationId: run.conversationId,
+          runId: run.id,
+          name,
+          mimeType,
+          sizeBytes,
+          storageKey,
+          createdBy: run.targetAgentRef,
+        },
+        at,
+      );
     }
   }
 
   private createFileUnchecked(input: CreateFileInput, at: string): ChatFile {
     const storageKey = normalizeStorageKey(input.storageKey);
     const id = crypto.randomUUID();
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO chat_files (
         id, conversation_id, message_id, run_id, name, mime_type,
         size_bytes, storage_key, created_by, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      input.conversationId,
-      input.messageId || null,
-      input.runId || null,
-      input.name.trim(),
-      input.mimeType || 'application/octet-stream',
-      input.sizeBytes ?? null,
-      storageKey,
-      input.createdBy,
-      at,
-    );
+    `,
+      )
+      .run(
+        id,
+        input.conversationId,
+        input.messageId || null,
+        input.runId || null,
+        input.name.trim(),
+        input.mimeType || 'application/octet-stream',
+        input.sizeBytes ?? null,
+        storageKey,
+        input.createdBy,
+        at,
+      );
     const row = this.db.prepare('SELECT * FROM chat_files WHERE id = ?').get(id) as RawFileRow;
     return rowToFile(row);
   }
 
   private assertParticipant(conversationId: string, kind: ChatParticipantKind, ref: string): void {
-    const exists = this.db.prepare(`
+    const exists = this.db
+      .prepare(
+        `
       SELECT 1 FROM chat_participants
        WHERE conversation_id = ? AND kind = ? AND ref = ?
-    `).get(conversationId, kind, ref);
+    `,
+      )
+      .get(conversationId, kind, ref);
     if (exists) return;
     const conv = this.db.prepare('SELECT 1 FROM chat_conversations WHERE id = ?').get(conversationId);
     if (!conv) throw new ChatNotFoundError(conversationId);
     throw new ChatForbiddenError();
   }
 
-  private getParticipant(
-    conversationId: string,
-    kind: ChatParticipantKind,
-    ref: string,
-  ): ChatParticipant | null {
-    const row = this.db.prepare(`
+  private getParticipant(conversationId: string, kind: ChatParticipantKind, ref: string): ChatParticipant | null {
+    const row = this.db
+      .prepare(
+        `
       SELECT * FROM chat_participants WHERE conversation_id = ? AND kind = ? AND ref = ?
-    `).get(conversationId, kind, ref) as RawParticipantRow | undefined;
+    `,
+      )
+      .get(conversationId, kind, ref) as RawParticipantRow | undefined;
     return row ? rowToParticipant(row) : null;
   }
 
   private listParticipantsUnchecked(conversationId: string): ChatParticipant[] {
-    const rows = this.db.prepare(`
+    const rows = this.db
+      .prepare(
+        `
       SELECT * FROM chat_participants WHERE conversation_id = ? ORDER BY kind DESC, added_at ASC
-    `).all(conversationId) as RawParticipantRow[];
+    `,
+      )
+      .all(conversationId) as RawParticipantRow[];
     return rows.map(rowToParticipant);
   }
 
-  private getMessage(id: string): ChatMessage | null {
-    const row = this.db.prepare('SELECT * FROM chat_messages WHERE id = ?')
-      .get(id) as RawMessageRow | undefined;
+  getMessage(id: string): ChatMessage | null {
+    const row = this.db.prepare('SELECT * FROM chat_messages WHERE id = ?').get(id) as RawMessageRow | undefined;
     return row ? rowToMessage(row) : null;
   }
 
   private getReadState(conversationId: string, userRef: string): ChatReadState | null {
-    const row = this.db.prepare(`
+    const row = this.db
+      .prepare(
+        `
       SELECT * FROM chat_read_state WHERE conversation_id = ? AND user_ref = ?
-    `).get(conversationId, userRef) as RawReadStateRow | undefined;
+    `,
+      )
+      .get(conversationId, userRef) as RawReadStateRow | undefined;
     return row ? rowToReadState(row) : null;
   }
 
-  private markReadUnchecked(
-    conversationId: string,
-    userRef: string,
-    messageId: string | null,
-    at: string,
-  ): void {
-    this.db.prepare(`
+  private markReadUnchecked(conversationId: string, userRef: string, messageId: string | null, at: string): void {
+    this.db
+      .prepare(
+        `
       INSERT INTO chat_read_state (conversation_id, user_ref, last_read_message_id, last_read_at)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(conversation_id, user_ref) DO UPDATE SET
         last_read_message_id = excluded.last_read_message_id,
         last_read_at = excluded.last_read_at
-    `).run(conversationId, userRef, messageId, at);
+    `,
+      )
+      .run(conversationId, userRef, messageId, at);
   }
 
   private summaryFromConversation(row: RawConversationRow, userRef: string): ChatConversationSummary {
     const conversation = rowToConversation(row);
-    const lastRow = this.db.prepare(`
+    const lastRow = this.db
+      .prepare(
+        `
       SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 1
-    `).get(row.id) as RawMessageRow | undefined;
+    `,
+      )
+      .get(row.id) as RawMessageRow | undefined;
     const read = this.getReadState(row.id, userRef);
     const unreadCount = countUnread(this.db, row.id, read?.lastReadMessageId || null, userRef);
     return {
@@ -888,6 +1043,8 @@ function rowToMessage(row: RawMessageRow): ChatMessage {
     content: row.content,
     mentionedAgentRefs: parseStringArray(row.mentioned_agent_refs),
     runId: row.run_id,
+    ...(row.reply_to ? { replyTo: row.reply_to } : {}),
+    ...(row.sender_session_id ? { senderSessionId: row.sender_session_id } : {}),
     createdAt: row.created_at,
   };
 }
@@ -915,6 +1072,9 @@ function rowToRun(row: RawRunRow): ChatRun {
     completedAt: row.completed_at,
     error: row.error,
     finalMessageId: row.final_message_id,
+    idempotencyOwner: row.idempotency_owner || null,
+    idempotencyKey: row.idempotency_key || null,
+    presentation: row.presentation_json ? (parseObject(row.presentation_json) as unknown as ChatRunPresentation) : null,
   };
 }
 
@@ -1015,9 +1175,7 @@ function parseStringArray(raw: string): string[] {
 function parseObject(raw: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {};
   }
@@ -1026,13 +1184,14 @@ function parseObject(raw: string): Record<string, unknown> {
 function payloadStatus(payload: Record<string, unknown>): ChatRunStatus | null {
   const status = payload.status;
   if (
-    status === 'queued'
-    || status === 'running'
-    || status === 'waiting_user'
-    || status === 'completed'
-    || status === 'failed'
-    || status === 'canceled'
-  ) return status;
+    status === 'queued' ||
+    status === 'running' ||
+    status === 'waiting_user' ||
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'canceled'
+  )
+    return status;
   return null;
 }
 
@@ -1067,19 +1226,27 @@ function countUnread(
   userRef: string,
 ): number {
   if (!lastReadMessageId) {
-    const row = db.prepare(`
+    const row = db
+      .prepare(
+        `
       SELECT COUNT(*) AS count FROM chat_messages
        WHERE conversation_id = ? AND NOT (sender_kind = 'user' AND sender_ref = ?)
-    `).get(conversationId, userRef) as { count: number };
+    `,
+      )
+      .get(conversationId, userRef) as { count: number };
     return row.count;
   }
-  const row = db.prepare(`
+  const row = db
+    .prepare(
+      `
     SELECT COUNT(*) AS count FROM chat_messages
      WHERE conversation_id = ?
        AND rowid > COALESCE((
          SELECT rowid FROM chat_messages WHERE conversation_id = ? AND id = ?
        ), 0)
        AND NOT (sender_kind = 'user' AND sender_ref = ?)
-  `).get(conversationId, conversationId, lastReadMessageId, userRef) as { count: number };
+  `,
+    )
+    .get(conversationId, conversationId, lastReadMessageId, userRef) as { count: number };
   return row.count;
 }

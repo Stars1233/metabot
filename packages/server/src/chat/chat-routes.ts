@@ -2,7 +2,13 @@ import type { Credential } from '../auth/credentials.js';
 import type { AgentRecord, AgentStore } from '../agents/agent-store.js';
 import type { ChatStore } from './chat-store.js';
 import { ChatForbiddenError, ChatNotFoundError } from './chat-store.js';
-import type { ChatParticipantCandidate, ChatParticipantKind, ChatRunEventKind } from './chat-types.js';
+import type {
+  ChatParticipantCandidate,
+  ChatParticipantKind,
+  ChatRun,
+  ChatRunEvent,
+  ChatRunEventKind,
+} from './chat-types.js';
 
 export interface RouteResult {
   status: number;
@@ -28,6 +34,7 @@ export interface ChatRouteDeps {
     toolUseId?: string;
     answer?: string;
   }) => void;
+  onRunEvent?: (run: ChatRun, event: ChatRunEvent) => void;
 }
 
 function err(status: number, error: string): RouteResult {
@@ -425,13 +432,15 @@ export function postRunEvent(
   const kind = parseEventKind(body.kind ?? body.type);
   if (!kind) return err(400, 'event_kind_required');
   const seq = typeof body.seq === 'number' ? body.seq : Number.parseInt(String(body.seq ?? ''), 10);
-  return withChatErrors(() => ({
-    status: 200,
-    body: deps.chat.appendRunEvent({
+  return withChatErrors(() => {
+    const event = deps.chat.appendRunEvent({
       runId,
       seq,
       kind,
       payload: asObject(body.payload),
-    }),
-  }));
+    });
+    const next = deps.chat.getRun(runId);
+    if (next) deps.onRunEvent?.(next, event);
+    return { status: 200, body: event };
+  });
 }
